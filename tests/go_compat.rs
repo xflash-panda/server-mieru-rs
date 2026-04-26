@@ -11,8 +11,7 @@ use server_mieru_rs::core::crypto::{
     hashed_password, increment_nonce, time_salt, time_slots_now,
 };
 use server_mieru_rs::core::metadata::{
-    DataMetadata, METADATA_LEN, Metadata, ProtocolType, SessionMetadata,
-    current_timestamp_minutes,
+    DataMetadata, METADATA_LEN, Metadata, ProtocolType, SessionMetadata, current_timestamp_minutes,
 };
 use server_mieru_rs::core::segment::{
     PACKET_OVERHEAD, STREAM_OVERHEAD, decode_first_stream_segment, decode_packet_segment,
@@ -22,7 +21,6 @@ use server_mieru_rs::core::segment::{
 fn hex(bytes: &[u8]) -> String {
     bytes.iter().map(|b| format!("{b:02x}")).collect()
 }
-
 
 // =========================================================================
 // 1. Key derivation: hashed_password
@@ -399,7 +397,10 @@ fn go_compat_tcp_first_segment_encode_decode_roundtrip() {
         decode_first_stream_segment(&key, &wire).expect("decode segment");
 
     assert_eq!(dec_payload, b"hello");
-    assert_eq!(nonce_after, enc_nonce, "nonce must be in sync after roundtrip");
+    assert_eq!(
+        nonce_after, enc_nonce,
+        "nonce must be in sync after roundtrip"
+    );
     match dec_meta {
         Metadata::Session(s) => {
             assert_eq!(s.protocol_type, ProtocolType::OpenSessionRequest);
@@ -571,7 +572,11 @@ fn go_compat_tcp_nonce_sync_10_segments() {
     for i in 1..10 {
         let (_, dec_payload) =
             decode_stream_segment(&key, &mut dec_nonce, &segments[i].0).expect(&format!("seg {i}"));
-        assert_eq!(dec_payload, segments[i].1.as_bytes(), "payload mismatch seg {i}");
+        assert_eq!(
+            dec_payload,
+            segments[i].1.as_bytes(),
+            "payload mismatch seg {i}"
+        );
     }
 
     assert_eq!(enc_nonce, dec_nonce, "nonce desync after 10 segments");
@@ -616,8 +621,7 @@ fn go_compat_tcp_nonce_sync_with_empty_payloads() {
             })
         };
         let include_nonce = i == 0;
-        let seg =
-            encode_stream_segment(&key, &mut enc_nonce, &meta, p, &[], &[], include_nonce);
+        let seg = encode_stream_segment(&key, &mut enc_nonce, &meta, p, &[], &[], include_nonce);
         segments.push(seg);
     }
 
@@ -804,8 +808,7 @@ fn go_compat_udp_packet_with_padding() {
     let expected_len = NONCE_SIZE + METADATA_LEN + TAG_SIZE + 12 + payload.len() + TAG_SIZE + 4;
     assert_eq!(wire.len(), expected_len);
 
-    let (_, dec_meta, dec_payload) =
-        decode_packet_segment(&key, &wire).expect("decode padded UDP");
+    let (_, dec_meta, dec_payload) = decode_packet_segment(&key, &wire).expect("decode padded UDP");
     assert_eq!(dec_payload, payload);
     match dec_meta {
         Metadata::Data(d) => {
@@ -877,7 +880,13 @@ fn go_compat_truncated_data_rejects() {
 
     // UDP: truncate
     let udp_wire = encode_packet_segment(&key, &sequential_nonce(), &meta, b"hello", &[], &[]);
-    for truncate_at in [0, 1, NONCE_SIZE, NONCE_SIZE + METADATA_LEN, udp_wire.len() - 1] {
+    for truncate_at in [
+        0,
+        1,
+        NONCE_SIZE,
+        NONCE_SIZE + METADATA_LEN,
+        udp_wire.len() - 1,
+    ] {
         assert!(
             decode_packet_segment(&key, &udp_wire[..truncate_at]).is_none(),
             "UDP should reject truncation at {truncate_at}"
@@ -1081,7 +1090,10 @@ fn go_compat_full_tcp_loopback_simulation() {
     }
 
     // Verify both nonce pairs are in sync
-    assert_eq!(client_send_nonce, server_recv_nonce, "send/recv nonce desync");
+    assert_eq!(
+        client_send_nonce, server_recv_nonce,
+        "send/recv nonce desync"
+    );
     assert_eq!(
         server_send_nonce, client_recv_nonce,
         "server send / client recv nonce desync"

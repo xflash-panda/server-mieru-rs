@@ -430,9 +430,7 @@ pub async fn handle_session(
 
     if command != outbound::SOCKS5_CONNECT {
         tracing::debug!(command, "Unsupported SOCKS5 command");
-        let _ = session
-            .write_all(&outbound::socks5_response(0x07))
-            .await;
+        let _ = session.write_all(&outbound::socks5_response(0x07)).await;
         return;
     }
 
