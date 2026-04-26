@@ -44,6 +44,7 @@ const LOG_TIME_FORMAT: &[time::format_description::FormatItem<'static>] = time::
 
 pub fn init_logger(log_level_str: &str) {
     let level = LogLevel::from_str(log_level_str).unwrap_or_default();
+
     let filter = tracing_subscriber::filter::Targets::new()
         .with_targets(vec![
             ("server_mieru_rs", level.to_level_filter()),
@@ -51,6 +52,7 @@ pub fn init_logger(log_level_str: &str) {
             ("server", level.to_level_filter()),
         ])
         .with_default(LevelFilter::INFO);
+
     let registry = tracing_subscriber::registry();
     registry
         .with(filter)
