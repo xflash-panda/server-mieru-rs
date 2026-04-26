@@ -4,7 +4,7 @@ updates:
     directory: /
     schedule:
       interval: weekly
-    target-branch: dev
+    target-branch: dev/master
     open-pull-requests-limit: 10
     labels:
       - dependencies
@@ -15,7 +15,7 @@ updates:
     directory: /
     schedule:
       interval: weekly
-    target-branch: dev
+    target-branch: dev/master
     open-pull-requests-limit: 5
     labels:
       - ci
