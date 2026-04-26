@@ -135,7 +135,11 @@ impl SessionManager {
                     suffix_padding: suffix_pad,
                     prefix_padding: vec![],
                 }) {
-                    tracing::warn!(session_id, "outbound channel full, OpenSessionResponse dropped: {}", e);
+                    tracing::warn!(
+                        session_id,
+                        "outbound channel full, OpenSessionResponse dropped: {}",
+                        e
+                    );
                 }
 
                 let outbound_tx = self.outbound_tx.clone();
@@ -158,10 +162,13 @@ impl SessionManager {
             ProtocolType::DataClientToServer => {
                 if let Some(entry) = self.sessions.get(&session_id)
                     && !payload.is_empty()
+                    && let Err(e) = entry.data_tx.try_send(payload)
                 {
-                    if let Err(e) = entry.data_tx.try_send(payload) {
-                        tracing::debug!(session_id, "session data channel full, payload dropped: {}", e);
-                    }
+                    tracing::debug!(
+                        session_id,
+                        "session data channel full, payload dropped: {}",
+                        e
+                    );
                 }
                 None
             }
@@ -197,7 +204,11 @@ impl SessionManager {
                 suffix_padding: suffix_pad,
                 prefix_padding: vec![],
             }) {
-                tracing::warn!(session_id, "outbound channel full, CloseSessionResponse dropped: {}", e);
+                tracing::warn!(
+                    session_id,
+                    "outbound channel full, CloseSessionResponse dropped: {}",
+                    e
+                );
             }
         }
     }
@@ -684,7 +695,11 @@ mod tests {
                 d.payload_length,
                 seg.payload.len()
             );
-            assert_eq!(written, seg.payload.len(), "written bytes must match payload");
+            assert_eq!(
+                written,
+                seg.payload.len(),
+                "written bytes must match payload"
+            );
         } else {
             panic!("expected Data metadata");
         }
