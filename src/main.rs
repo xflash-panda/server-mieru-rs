@@ -14,8 +14,8 @@ use tokio::sync::Semaphore;
 use tokio_util::sync::CancellationToken;
 
 use business::{
-    ApiManager, MieruStatsCollector, MieruUserManager, PanelStatsCollector, StatsCollector,
-    TaskConfig,
+    ApiManager, MieruStatsCollector, MieruUserManager, NodeType, PanelStatsCollector,
+    StatsCollector, TaskConfig,
 };
 use connection::ConnectionManager;
 use core::session::SessionManager;
@@ -26,29 +26,38 @@ use panel_core::PanelApi;
 
 #[tokio::main]
 async fn main() -> Result<()> {
+    rustls::crypto::aws_lc_rs::default_provider()
+        .install_default()
+        .expect("Failed to install rustls crypto provider");
+
     let cli = config::CliArgs::parse_args();
     cli.validate()?;
 
     logger::init_logger(&cli.log_mode);
 
     log::info!(
-        api = %cli.api,
+        server_host = %cli.server_host,
+        port = cli.port,
         node = cli.node,
-        "Starting Mieru server"
+        "Starting Mieru server agent"
     );
 
     let panel_config = business::PanelConfig {
-        api: cli.api.clone(),
-        token: cli.token.clone(),
+        server_host: cli.server_host.clone(),
+        server_port: cli.port,
         node_id: cli.node,
-        node_type: panel_core::NodeType::Mieru,
-        api_timeout: cli.api_timeout.as_secs(),
-        debug: cli.log_mode == "debug",
+        node_type: NodeType::Mieru,
         data_dir: cli.data_dir.clone(),
+        api_timeout: cli.api_timeout,
+        server_name: cli
+            .server_name
+            .clone()
+            .unwrap_or_else(|| cli.server_host.clone()),
+        ca_cert_path: cli.ca_file.clone(),
         ip_version: cli.panel_ip_version,
     };
 
-    let api_manager = Arc::new(ApiManager::new(panel_config)?);
+    let api_manager = Arc::new(ApiManager::new(panel_config));
     let user_manager = Arc::new(MieruUserManager::new(business::uuid_key));
 
     let node_config = api_manager.fetch_config().await?;

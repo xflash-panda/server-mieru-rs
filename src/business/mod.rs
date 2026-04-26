@@ -2,10 +2,12 @@ use sha2::{Digest, Sha256};
 use std::sync::Arc;
 
 // Re-export panel types
-pub use panel_core::{
-    BackgroundTasks, StatsCollector as PanelStatsCollector, TaskConfig, UserManager,
+pub use panel_connect_rpc::{
+    ConnectRpcApiManager as ApiManager, ConnectRpcPanelConfig as PanelConfig, IpVersion,
 };
-pub use panel_http::{HttpApiManager as ApiManager, HttpPanelConfig as PanelConfig, IpVersion};
+pub use panel_core::{
+    BackgroundTasks, NodeType, StatsCollector as PanelStatsCollector, TaskConfig, UserManager,
+};
 
 pub type UserId = i64;
 
