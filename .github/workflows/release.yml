@@ -10,6 +10,7 @@ permissions:
 
 env:
   CARGO_TERM_COLOR: always
+  CARGO_NET_GIT_FETCH_WITH_CLI: "true"
   BINARY_NAME: server-mieru
 
 jobs:
@@ -31,6 +32,9 @@ jobs:
 
     steps:
       - uses: actions/checkout@v4
+
+      - name: Configure git for private deps
+        run: git config --global url."https://x-access-token:${{ secrets.GIT_DEPS_TOKEN }}@github.com/".insteadOf "https://github.com/"
 
       - uses: dtolnay/rust-toolchain@stable
         with:
