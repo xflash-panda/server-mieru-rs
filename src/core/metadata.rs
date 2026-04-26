@@ -337,8 +337,8 @@ mod tests {
     #[test]
     fn test_session_metadata_reserved_bytes_zero() {
         let buf = sample_session().encode();
-        for i in 18..32 {
-            assert_eq!(buf[i], 0, "byte {i} should be zero (reserved)");
+        for (i, &byte) in buf[18..32].iter().enumerate() {
+            assert_eq!(byte, 0, "byte {} should be zero (reserved)", i + 18);
         }
     }
 
@@ -435,8 +435,8 @@ mod tests {
     #[test]
     fn test_data_metadata_reserved_bytes_zero() {
         let buf = sample_data().encode();
-        for i in 25..32 {
-            assert_eq!(buf[i], 0, "byte {i} should be zero (reserved)");
+        for (i, &byte) in buf[25..32].iter().enumerate() {
+            assert_eq!(byte, 0, "byte {} should be zero (reserved)", i + 25);
         }
     }
 

@@ -64,10 +64,10 @@ impl UserRegistry {
                 let salt = crate::core::crypto::time_salt(slot);
                 let key = derive_key(&hashed_pw, &salt);
 
-                if let Some(plaintext) = decrypt(&key, nonce, encrypted_metadata) {
-                    if plaintext.len() == METADATA_LEN {
-                        return Some((user_id, key));
-                    }
+                if let Some(plaintext) = decrypt(&key, nonce, encrypted_metadata)
+                    && plaintext.len() == METADATA_LEN
+                {
+                    return Some((user_id, key));
                 }
             }
         }

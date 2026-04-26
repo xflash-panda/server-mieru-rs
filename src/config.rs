@@ -159,15 +159,15 @@ pub fn parse_listen_config(mieru_config: &MieruConfig) -> ListenConfig {
     // Parse port_range "start-end", add all ports in range (dedup with server_port)
     if let Some(ref range_str) = mieru_config.port_range {
         let parts: Vec<&str> = range_str.splitn(2, '-').collect();
-        if parts.len() == 2 {
-            if let (Ok(start), Ok(end)) = (
+        if parts.len() == 2
+            && let (Ok(start), Ok(end)) = (
                 parts[0].trim().parse::<u16>(),
                 parts[1].trim().parse::<u16>(),
-            ) {
-                for p in start..=end {
-                    if !ports.contains(&p) {
-                        ports.push(p);
-                    }
+            )
+        {
+            for p in start..=end {
+                if !ports.contains(&p) {
+                    ports.push(p);
                 }
             }
         }

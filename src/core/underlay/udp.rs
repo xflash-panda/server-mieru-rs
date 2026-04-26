@@ -10,13 +10,13 @@ use crate::core::metadata::{METADATA_LEN, Metadata};
 use crate::core::segment::{decode_packet_segment, encode_packet_segment};
 use crate::core::underlay::registry::UserRegistry;
 
+/// Result of authenticating a UDP packet: (user_id, key, nonce, metadata, payload).
+type AuthResult = (UserId, [u8; KEY_LEN], [u8; NONCE_SIZE], Metadata, Vec<u8>);
+
 /// Authenticate and decode a single UDP packet.
 ///
 /// Returns `(user_id, key, nonce, metadata, payload)` on success.
-pub fn authenticate_packet(
-    data: &[u8],
-    registry: &UserRegistry,
-) -> Option<(UserId, [u8; KEY_LEN], [u8; NONCE_SIZE], Metadata, Vec<u8>)> {
+pub fn authenticate_packet(data: &[u8], registry: &UserRegistry) -> Option<AuthResult> {
     // Minimum size: nonce + encrypted_metadata + tag.
     if data.len() < NONCE_SIZE + METADATA_LEN + TAG_SIZE {
         return None;

@@ -75,23 +75,23 @@ async fn connect_target_inner(
     resolved: Option<Arc<[SocketAddr]>>,
 ) -> std::io::Result<TcpStream> {
     // Use pre-resolved addresses when available to avoid a redundant DNS lookup.
-    if let Some(ref addrs) = resolved {
-        if !addrs.is_empty() {
-            let port = target.port();
-            let mut last_err = None;
-            for addr in addrs.iter() {
-                let mut addr = *addr;
-                addr.set_port(port);
-                match TcpStream::connect(addr).await {
-                    Ok(stream) => {
-                        let _ = stream.set_nodelay(true);
-                        return Ok(stream);
-                    }
-                    Err(e) => last_err = Some(e),
+    if let Some(ref addrs) = resolved
+        && !addrs.is_empty()
+    {
+        let port = target.port();
+        let mut last_err = None;
+        for addr in addrs.iter() {
+            let mut addr = *addr;
+            addr.set_port(port);
+            match TcpStream::connect(addr).await {
+                Ok(stream) => {
+                    let _ = stream.set_nodelay(true);
+                    return Ok(stream);
                 }
+                Err(e) => last_err = Some(e),
             }
-            return Err(last_err.unwrap_or_else(|| std::io::Error::other("no resolved addresses")));
         }
+        return Err(last_err.unwrap_or_else(|| std::io::Error::other("no resolved addresses")));
     }
 
     // Connect directly from the address variant.

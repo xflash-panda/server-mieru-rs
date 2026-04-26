@@ -378,11 +378,11 @@ async fn handle_session(
             match outbound::connect_target(&target, resolved, CONNECT_TIMEOUT).await {
                 Ok(mut remote) => {
                     let remaining = &first_data[consumed..];
-                    if !remaining.is_empty() {
-                        if let Err(e) = remote.write_all(remaining).await {
-                            log::debug!(error = %e, "Failed to send initial data");
-                            return;
-                        }
+                    if !remaining.is_empty()
+                        && let Err(e) = remote.write_all(remaining).await
+                    {
+                        log::debug!(error = %e, "Failed to send initial data");
+                        return;
                     }
                     let _ = tokio::io::copy_bidirectional(&mut session, &mut remote).await;
                 }

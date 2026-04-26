@@ -119,8 +119,6 @@ mod tests {
 
     #[test]
     fn test_log_time_format_is_valid() {
-        // Verify the format has entries (non-empty) and can be used to construct a LocalTime
-        assert!(!LOG_TIME_FORMAT.is_empty());
         let _timer = tracing_subscriber::fmt::time::LocalTime::new(LOG_TIME_FORMAT);
     }
 }

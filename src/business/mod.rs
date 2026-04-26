@@ -22,7 +22,7 @@ pub fn uuid_key(uuid: &str) -> String {
 pub fn mieru_hashed_password(uuid: &str) -> [u8; 32] {
     let mut hasher = Sha256::new();
     hasher.update(uuid.as_bytes()); // password
-    hasher.update(&[0x00]);
+    hasher.update([0x00]);
     hasher.update(uuid.as_bytes()); // username
     let result = hasher.finalize();
     let mut key = [0u8; 32];
