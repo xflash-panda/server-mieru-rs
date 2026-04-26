@@ -69,7 +69,7 @@ impl SessionManager {
     /// The caller should drive the receiver to write segments back to the
     /// underlay connection.
     pub fn new() -> (Self, mpsc::Receiver<OutboundSegment>) {
-        let (outbound_tx, outbound_rx) = mpsc::channel(256);
+        let (outbound_tx, outbound_rx) = mpsc::channel(2048);
         (
             Self {
                 sessions: HashMap::new(),
@@ -129,12 +129,14 @@ impl SessionManager {
                     payload_length: 0,
                     suffix_padding_length: suffix_pad.len() as u8,
                 });
-                let _ = self.outbound_tx.try_send(OutboundSegment {
+                if let Err(e) = self.outbound_tx.try_send(OutboundSegment {
                     metadata: response_meta,
                     payload: vec![],
                     suffix_padding: suffix_pad,
                     prefix_padding: vec![],
-                });
+                }) {
+                    tracing::warn!(session_id, "outbound channel full, OpenSessionResponse dropped: {}", e);
+                }
 
                 let outbound_tx = self.outbound_tx.clone();
                 let poll_sender = PollSender::new(outbound_tx.clone());
@@ -157,7 +159,9 @@ impl SessionManager {
                 if let Some(entry) = self.sessions.get(&session_id)
                     && !payload.is_empty()
                 {
-                    let _ = entry.data_tx.try_send(payload);
+                    if let Err(e) = entry.data_tx.try_send(payload) {
+                        tracing::debug!(session_id, "session data channel full, payload dropped: {}", e);
+                    }
                 }
                 None
             }
@@ -187,12 +191,14 @@ impl SessionManager {
                 payload_length: 0,
                 suffix_padding_length: suffix_pad.len() as u8,
             });
-            let _ = self.outbound_tx.try_send(OutboundSegment {
+            if let Err(e) = self.outbound_tx.try_send(OutboundSegment {
                 metadata: close_meta,
                 payload: vec![],
                 suffix_padding: suffix_pad,
                 prefix_padding: vec![],
-            });
+            }) {
+                tracing::warn!(session_id, "outbound channel full, CloseSessionResponse dropped: {}", e);
+            }
         }
     }
 
@@ -221,14 +227,24 @@ impl SessionStream {
     }
 
     /// Send data back to the client via the outbound channel.
+    ///
+    /// Panics if `payload.len() > u16::MAX` (protocol limit).
     pub async fn send(
         &mut self,
         payload: Vec<u8>,
     ) -> Result<(), mpsc::error::SendError<OutboundSegment>> {
+        debug_assert!(
+            payload.len() <= u16::MAX as usize,
+            "payload {} exceeds protocol max {}",
+            payload.len(),
+            u16::MAX
+        );
+
         let seq = self.next_seq;
         self.next_seq = self.next_seq.wrapping_add(1);
 
-        let (prefix_pad, suffix_pad) = padding::data_padding(payload.len());
+        let payload_len = payload.len().min(u16::MAX as usize);
+        let (prefix_pad, suffix_pad) = padding::data_padding(payload_len);
         let meta = Metadata::Data(DataMetadata {
             protocol_type: ProtocolType::DataServerToClient,
             timestamp: current_timestamp_minutes(),
@@ -238,7 +254,7 @@ impl SessionStream {
             window_size: 256,
             fragment_number: 0,
             prefix_padding_length: prefix_pad.len() as u8,
-            payload_length: payload.len() as u16,
+            payload_length: payload_len as u16,
             suffix_padding_length: suffix_pad.len() as u8,
         });
 
@@ -332,7 +348,9 @@ impl tokio::io::AsyncWrite for SessionStream {
         let seq = self.next_seq;
         self.next_seq = self.next_seq.wrapping_add(1);
 
-        let payload = buf.to_vec();
+        // Cap at u16::MAX so payload_length metadata field is not truncated.
+        let effective_len = buf.len().min(u16::MAX as usize);
+        let payload = buf[..effective_len].to_vec();
         let payload_len = payload.len();
 
         let (prefix_pad, suffix_pad) = padding::data_padding(payload_len);
@@ -619,5 +637,56 @@ mod tests {
         let result = mgr.dispatch(&meta, vec![]);
         assert!(result.is_none(), "session ID 0 should be rejected");
         assert_eq!(mgr.session_count(), 0);
+    }
+
+    // ---- Bug verification tests ----
+
+    #[tokio::test]
+    async fn test_open_session_responses_not_dropped() {
+        // Opening more sessions than the outbound channel capacity must not
+        // silently drop OpenSessionResponse control messages.
+        let (mut mgr, mut outbound_rx) = SessionManager::new();
+        let n = 300u32;
+        for id in 1..=n {
+            let meta = open_session_meta(id);
+            let _ = mgr.dispatch(&meta, vec![]);
+        }
+        let mut count = 0;
+        while outbound_rx.try_recv().is_ok() {
+            count += 1;
+        }
+        assert_eq!(
+            count, n as usize,
+            "all OpenSessionResponses must be delivered"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_poll_write_large_payload_metadata_consistency() {
+        // Writing more than u16::MAX bytes through poll_write must not
+        // produce metadata with a truncated payload_length.
+        use tokio::io::AsyncWriteExt;
+
+        let (mut mgr, mut outbound_rx) = SessionManager::new();
+        let meta = open_session_meta(1);
+        let mut stream = mgr.dispatch(&meta, vec![]).unwrap();
+        let _ = outbound_rx.try_recv(); // consume open response
+
+        let large_buf = vec![0xAB; 70_000]; // > u16::MAX (65535)
+        let written = stream.write(&large_buf).await.unwrap();
+
+        let seg = outbound_rx.try_recv().expect("expected data segment");
+        if let Metadata::Data(d) = &seg.metadata {
+            assert_eq!(
+                d.payload_length as usize,
+                seg.payload.len(),
+                "metadata payload_length ({}) must match actual payload len ({})",
+                d.payload_length,
+                seg.payload.len()
+            );
+            assert_eq!(written, seg.payload.len(), "written bytes must match payload");
+        } else {
+            panic!("expected Data metadata");
+        }
     }
 }

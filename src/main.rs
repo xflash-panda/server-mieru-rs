@@ -197,11 +197,10 @@ async fn main() -> Result<()> {
             let conn_mgr = connection_manager.clone();
 
             tokio::spawn(async move {
-                let registry = Arc::new(UserRegistry::from_user_manager(&user_mgr));
                 let relay = core::underlay::udp_relay::UdpRelay::new(socket);
                 relay
                     .run(
-                        registry,
+                        user_mgr,
                         stats,
                         router,
                         conn_mgr,
