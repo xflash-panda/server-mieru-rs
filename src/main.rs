@@ -5,29 +5,24 @@ use server_mieru_rs::connection;
 use server_mieru_rs::core;
 use server_mieru_rs::logger;
 use server_mieru_rs::net;
-use server_mieru_rs::outbound;
-
 use logger::log;
 
 use anyhow::Result;
 use std::sync::Arc;
 use std::time::Duration;
-use tokio::io::AsyncWriteExt;
 use tokio::sync::Semaphore;
 use tokio_util::sync::CancellationToken;
 
-use acl::OutboundType;
 use business::{
     ApiManager, MieruStatsCollector, MieruUserManager, PanelStatsCollector, StatsCollector,
     TaskConfig,
 };
 use connection::ConnectionManager;
-use core::session::{SessionManager, SessionStream};
+use core::session::SessionManager;
 use core::underlay::registry::UserRegistry;
 use core::underlay::tcp::TcpUnderlay;
+use core::underlay::udp_relay::handle_session;
 use panel_core::PanelApi;
-
-const CONNECT_TIMEOUT: Duration = Duration::from_secs(10);
 
 #[tokio::main]
 async fn main() -> Result<()> {
@@ -194,33 +189,14 @@ async fn main() -> Result<()> {
 
             let user_mgr = Arc::clone(&user_manager);
             let stats = Arc::clone(&mieru_stats);
+            let router = Arc::clone(&router);
             let cancel = cancel_token.clone();
+            let conn_mgr = connection_manager.clone();
 
             tokio::spawn(async move {
-                let mut buf = vec![0u8; 1500];
-                loop {
-                    tokio::select! {
-                        result = socket.recv_from(&mut buf) => {
-                            match result {
-                                Ok((n, peer)) => {
-                                    let packet = buf[..n].to_vec();
-                                    let registry = UserRegistry::from_user_manager(&user_mgr);
-                                    if let Some((user_id, _key, _nonce, _metadata, _payload)) =
-                                        core::underlay::udp::authenticate_packet(&packet, &registry)
-                                    {
-                                        log::debug!(peer = %peer, user_id, "UDP packet authenticated");
-                                        stats.record_upload(user_id, n as u64);
-                                        stats.record_request(user_id);
-                                    }
-                                }
-                                Err(e) => {
-                                    log::warn!(error = %e, "UDP recv error");
-                                }
-                            }
-                        }
-                        _ = cancel.cancelled() => break,
-                    }
-                }
+                let registry = Arc::new(UserRegistry::from_user_manager(&user_mgr));
+                let relay = core::underlay::udp_relay::UdpRelay::new(socket);
+                relay.run(registry, stats, router, conn_mgr, cancel).await;
             });
         }
     }
@@ -330,7 +306,7 @@ async fn handle_tcp_connection(
             seg = outbound_rx.recv() => {
                 match seg {
                     Some(seg) => {
-                        if let Err(e) = underlay.write_segment(stream, &seg.metadata, &seg.payload).await {
+                        if let Err(e) = underlay.write_segment(stream, &seg.metadata, &seg.payload, &seg.prefix_padding, &seg.suffix_padding).await {
                             log::debug!(error = %e, "Write segment failed");
                             break;
                         }
@@ -351,51 +327,3 @@ async fn handle_tcp_connection(
     Ok(())
 }
 
-async fn handle_session(
-    mut session: SessionStream,
-    router: &dyn acl::OutboundRouter,
-    user_id: business::UserId,
-    _stats: &dyn StatsCollector,
-) {
-    let first_data = match session.recv().await {
-        Some(data) => data,
-        None => return,
-    };
-
-    let (target, consumed) = match outbound::parse_socks_address(&first_data) {
-        Ok(r) => r,
-        Err(e) => {
-            log::debug!(error = %e, "Failed to parse target address");
-            return;
-        }
-    };
-
-    log::debug!(target = %target, user_id, "Session opened");
-
-    let route = router.route(&target).await;
-    match route {
-        OutboundType::Direct { resolved } => {
-            match outbound::connect_target(&target, resolved, CONNECT_TIMEOUT).await {
-                Ok(mut remote) => {
-                    let remaining = &first_data[consumed..];
-                    if !remaining.is_empty()
-                        && let Err(e) = remote.write_all(remaining).await
-                    {
-                        log::debug!(error = %e, "Failed to send initial data");
-                        return;
-                    }
-                    let _ = tokio::io::copy_bidirectional(&mut session, &mut remote).await;
-                }
-                Err(e) => {
-                    log::debug!(target = %target, error = %e, "Failed to connect");
-                }
-            }
-        }
-        OutboundType::Reject => {
-            log::debug!(target = %target, "Connection rejected by ACL");
-        }
-        _ => {
-            log::debug!(target = %target, "Proxy outbound");
-        }
-    }
-}
