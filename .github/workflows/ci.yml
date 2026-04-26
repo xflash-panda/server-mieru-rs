@@ -15,7 +15,7 @@ jobs:
     name: Check
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v6
       - name: Configure git for private deps
         run: git config --global url."https://x-access-token:${{ secrets.GIT_DEPS_TOKEN }}@github.com/".insteadOf "https://github.com/"
       - uses: dtolnay/rust-toolchain@stable
@@ -26,7 +26,7 @@ jobs:
     name: Format
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v6
       - uses: dtolnay/rust-toolchain@stable
         with:
           components: rustfmt
@@ -36,7 +36,7 @@ jobs:
     name: Clippy
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v6
       - name: Configure git for private deps
         run: git config --global url."https://x-access-token:${{ secrets.GIT_DEPS_TOKEN }}@github.com/".insteadOf "https://github.com/"
       - uses: dtolnay/rust-toolchain@stable
@@ -49,7 +49,7 @@ jobs:
     name: Test
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v6
       - name: Configure git for private deps
         run: git config --global url."https://x-access-token:${{ secrets.GIT_DEPS_TOKEN }}@github.com/".insteadOf "https://github.com/"
       - uses: dtolnay/rust-toolchain@stable
