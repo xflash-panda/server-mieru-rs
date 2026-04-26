@@ -68,26 +68,29 @@ impl TcpUnderlay {
         let mut recv_nonce = nonce;
         increment_nonce(&mut recv_nonce);
 
-        // Determine remaining bytes to read: prefix_padding + encrypted_payload + tag + suffix_padding.
+        // Determine remaining bytes to read: prefix_padding + [encrypted_payload + tag] + suffix_padding.
+        // When payload is empty, there is no encrypted payload block.
         let (prefix_len, suffix_len) = padding_lengths(&metadata);
         let pay_len = payload_length(&metadata);
 
-        let remaining_len = prefix_len + pay_len + TAG_SIZE + suffix_len;
+        let payload_block_len = if pay_len > 0 { pay_len + TAG_SIZE } else { 0 };
+        let remaining_len = prefix_len + payload_block_len + suffix_len;
         let mut remaining = vec![0u8; remaining_len];
         if remaining_len > 0 {
             stream.read_exact(&mut remaining).await?;
         }
 
-        // Decrypt payload.
+        // Decrypt payload (only if non-empty; nonce only advances when payload exists).
         let payload = if pay_len > 0 {
             let after_prefix = &remaining[prefix_len..];
             let encrypted_payload = &after_prefix[..pay_len + TAG_SIZE];
-            crate::core::crypto::decrypt(&key, &recv_nonce, encrypted_payload)
-                .ok_or(Error::DecryptionFailed)?
+            let p = crate::core::crypto::decrypt(&key, &recv_nonce, encrypted_payload)
+                .ok_or(Error::DecryptionFailed)?;
+            increment_nonce(&mut recv_nonce);
+            p
         } else {
             vec![]
         };
-        increment_nonce(&mut recv_nonce);
 
         // Generate a fresh random nonce for the send direction.
         let send_nonce = generate_random_nonce();
@@ -124,26 +127,29 @@ impl TcpUnderlay {
             Metadata::decode(&meta_arr).ok_or(Error::InvalidSegment("invalid metadata".into()))?;
         increment_nonce(&mut self.recv_nonce);
 
-        // Read remaining: prefix_padding + encrypted_payload + tag + suffix_padding.
+        // Read remaining: prefix_padding + [encrypted_payload + tag] + suffix_padding.
+        // When payload is empty, there is no encrypted payload block.
         let (prefix_len, suffix_len) = padding_lengths(&metadata);
         let pay_len = payload_length(&metadata);
 
-        let remaining_len = prefix_len + pay_len + TAG_SIZE + suffix_len;
+        let payload_block_len = if pay_len > 0 { pay_len + TAG_SIZE } else { 0 };
+        let remaining_len = prefix_len + payload_block_len + suffix_len;
         let mut remaining = vec![0u8; remaining_len];
         if remaining_len > 0 {
             stream.read_exact(&mut remaining).await?;
         }
 
-        // Decrypt payload.
+        // Decrypt payload (only if non-empty; nonce only advances when payload exists).
         let payload = if pay_len > 0 {
             let after_prefix = &remaining[prefix_len..];
             let encrypted_payload = &after_prefix[..pay_len + TAG_SIZE];
-            crate::core::crypto::decrypt(&self.key, &self.recv_nonce, encrypted_payload)
-                .ok_or(Error::DecryptionFailed)?
+            let p = crate::core::crypto::decrypt(&self.key, &self.recv_nonce, encrypted_payload)
+                .ok_or(Error::DecryptionFailed)?;
+            increment_nonce(&mut self.recv_nonce);
+            p
         } else {
             vec![]
         };
-        increment_nonce(&mut self.recv_nonce);
 
         Ok((metadata, payload))
     }
@@ -353,6 +359,203 @@ mod tests {
 
         // Encoder and decoder nonce must be synchronized.
         assert_eq!(enc_nonce, dec_nonce);
+    }
+
+    // -----------------------------------------------------------------------
+    // Empty payload nonce tests — verifies the bug fix
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn test_tcp_empty_payload_nonce_advances_once() {
+        let key = test_key();
+        let original = test_nonce();
+        let mut nonce = test_nonce();
+
+        // Encode a session segment with empty payload (like OpenSessionResponse)
+        let meta = Metadata::Session(SessionMetadata {
+            protocol_type: ProtocolType::OpenSessionResponse,
+            timestamp: current_timestamp_minutes(),
+            session_id: 42,
+            sequence: 0,
+            status_code: 0,
+            payload_length: 0,
+            suffix_padding_length: 0,
+        });
+        encode_test_segment(&key, &mut nonce, &meta, &[], false);
+
+        let mut expected = original;
+        increment_nonce(&mut expected); // only once for metadata
+        assert_eq!(
+            nonce, expected,
+            "empty payload segment should advance nonce only once"
+        );
+    }
+
+    #[test]
+    fn test_tcp_empty_payload_decode_roundtrip() {
+        let key = test_key();
+        let mut enc_nonce = test_nonce();
+        let mut dec_nonce = test_nonce();
+
+        let meta = Metadata::Session(SessionMetadata {
+            protocol_type: ProtocolType::OpenSessionResponse,
+            timestamp: current_timestamp_minutes(),
+            session_id: 42,
+            sequence: 0,
+            status_code: 0,
+            payload_length: 0,
+            suffix_padding_length: 0,
+        });
+        let encoded = encode_test_segment(&key, &mut enc_nonce, &meta, &[], false);
+        let (decoded_meta, decoded_payload) =
+            decode_test_segment(&key, &mut dec_nonce, &encoded).expect("decode failed");
+
+        assert!(decoded_payload.is_empty());
+        assert_eq!(
+            decoded_meta.protocol_type(),
+            ProtocolType::OpenSessionResponse
+        );
+        assert_eq!(
+            enc_nonce, dec_nonce,
+            "nonce desync after empty payload roundtrip"
+        );
+    }
+
+    #[test]
+    fn test_tcp_simulated_session_handshake_flow() {
+        // Simulates the exact flow that caused the nonce desync bug:
+        //
+        // Client→Server: OpenSessionRequest with SOCKS5 payload (nonce +2)
+        // Server→Client: OpenSessionResponse empty (nonce +1, NOT +2!)
+        // Server→Client: DataServerToClient with SOCKS5 response (nonce +2)
+        // Client→Server: DataClientToServer with HTTP data (nonce +2)
+        // Server→Client: DataServerToClient with HTTP response (nonce +2)
+
+        let key = test_key();
+
+        // --- Client send direction ---
+        let mut client_send_nonce = test_nonce();
+
+        // Client sends OpenSessionRequest with SOCKS5 request payload
+        let socks5_request =
+            vec![0x05, 0x01, 0x00, 0x01, 127, 0, 0, 1, 0x00, 0x50]; // CONNECT 127.0.0.1:80
+        let open_meta = Metadata::Session(SessionMetadata {
+            protocol_type: ProtocolType::OpenSessionRequest,
+            timestamp: current_timestamp_minutes(),
+            session_id: 1,
+            sequence: 0,
+            status_code: 0,
+            payload_length: socks5_request.len() as u16,
+            suffix_padding_length: 0,
+        });
+        let first_seg = encode_test_segment(
+            &key,
+            &mut client_send_nonce,
+            &open_meta,
+            &socks5_request,
+            true,
+        );
+
+        // Server decodes first segment
+        let (server_recv_nonce, decoded_meta, decoded_payload) =
+            decode_test_first_segment(&key, &first_seg).expect("server decode first failed");
+        assert_eq!(decoded_payload, socks5_request);
+        assert_eq!(
+            decoded_meta.protocol_type(),
+            ProtocolType::OpenSessionRequest
+        );
+        assert_eq!(
+            server_recv_nonce, client_send_nonce,
+            "nonce sync after first segment"
+        );
+
+        // --- Server send direction ---
+        let mut server_send_nonce = [0xAA; NONCE_SIZE];
+
+        // Server sends OpenSessionResponse (EMPTY payload — the bug trigger)
+        let open_resp = Metadata::Session(SessionMetadata {
+            protocol_type: ProtocolType::OpenSessionResponse,
+            timestamp: current_timestamp_minutes(),
+            session_id: 1,
+            sequence: 0,
+            status_code: 0,
+            payload_length: 0,
+            suffix_padding_length: 0,
+        });
+        let resp_seg =
+            encode_test_segment(&key, &mut server_send_nonce, &open_resp, &[], true);
+
+        // Client decodes first server segment
+        let (client_recv_nonce, decoded_resp, decoded_resp_payload) =
+            decode_test_first_segment(&key, &resp_seg).expect("client decode resp failed");
+        assert!(decoded_resp_payload.is_empty());
+        assert_eq!(
+            decoded_resp.protocol_type(),
+            ProtocolType::OpenSessionResponse
+        );
+        assert_eq!(
+            server_send_nonce, client_recv_nonce,
+            "CRITICAL: nonce desync after empty OpenSessionResponse!"
+        );
+
+        // Server sends DataServerToClient with SOCKS5 response
+        let socks5_response = vec![0x05, 0x00, 0x00, 0x01, 0, 0, 0, 0, 0, 0];
+        let data_meta = Metadata::Data(DataMetadata {
+            protocol_type: ProtocolType::DataServerToClient,
+            timestamp: current_timestamp_minutes(),
+            session_id: 1,
+            sequence: 1,
+            unack_seq: 0,
+            window_size: 256,
+            fragment_number: 0,
+            prefix_padding_length: 0,
+            payload_length: socks5_response.len() as u16,
+            suffix_padding_length: 0,
+        });
+        let mut client_recv_nonce = client_recv_nonce;
+        let data_seg = encode_test_segment(
+            &key,
+            &mut server_send_nonce,
+            &data_meta,
+            &socks5_response,
+            false,
+        );
+
+        // Client decodes SOCKS5 response
+        let (_, decoded_socks_resp) =
+            decode_test_segment(&key, &mut client_recv_nonce, &data_seg)
+                .expect("SOCKS5 response decode failed — nonce desync!");
+        assert_eq!(decoded_socks_resp, socks5_response);
+        assert_eq!(
+            server_send_nonce, client_recv_nonce,
+            "nonce sync after SOCKS5 response"
+        );
+
+        // Server sends HTTP response data
+        let http_data = b"HTTP/1.1 200 OK\r\nContent-Length: 5\r\n\r\nhello";
+        let http_meta = Metadata::Data(DataMetadata {
+            protocol_type: ProtocolType::DataServerToClient,
+            timestamp: current_timestamp_minutes(),
+            session_id: 1,
+            sequence: 2,
+            unack_seq: 0,
+            window_size: 256,
+            fragment_number: 0,
+            prefix_padding_length: 0,
+            payload_length: http_data.len() as u16,
+            suffix_padding_length: 0,
+        });
+        let http_seg =
+            encode_test_segment(&key, &mut server_send_nonce, &http_meta, http_data, false);
+
+        let (_, decoded_http) =
+            decode_test_segment(&key, &mut client_recv_nonce, &http_seg)
+                .expect("HTTP data decode failed — nonce desync propagated!");
+        assert_eq!(decoded_http, http_data);
+        assert_eq!(
+            server_send_nonce, client_recv_nonce,
+            "nonce sync after HTTP data"
+        );
     }
 
     #[test]

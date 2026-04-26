@@ -70,9 +70,16 @@ pub fn encode_stream_segment(
     let enc_meta = encrypt(key, nonce, &meta_plain);
     increment_nonce(nonce);
 
-    // 2. Encrypt payload with new nonce, then advance.
-    let enc_payload = encrypt(key, nonce, payload);
-    increment_nonce(nonce);
+    // 2. Encrypt payload with new nonce (only if non-empty), then advance.
+    //    Go mieru skips payload encryption when payload is empty, so nonce
+    //    only advances when there is actual payload to encrypt.
+    let enc_payload = if !payload.is_empty() {
+        let enc = encrypt(key, nonce, payload);
+        increment_nonce(nonce);
+        enc
+    } else {
+        vec![]
+    };
 
     // 3. Assemble output.
     let mut out = Vec::with_capacity(
@@ -133,7 +140,9 @@ pub fn decode_stream_segment(
     let rest = &data[METADATA_LEN + TAG_SIZE..];
 
     // Layout of rest: [prefix_padding][encrypted_payload + tag][suffix_padding]
-    let expected_rest = prefix_len + pay_len + TAG_SIZE + suffix_len;
+    // When payload is empty, there is no encrypted payload block (no tag either).
+    let payload_block_len = if pay_len > 0 { pay_len + TAG_SIZE } else { 0 };
+    let expected_rest = prefix_len + payload_block_len + suffix_len;
     if rest.len() < expected_rest {
         return None;
     }
@@ -141,10 +150,15 @@ pub fn decode_stream_segment(
     // 4. Skip prefix padding.
     let after_prefix = &rest[prefix_len..];
 
-    // 5. Decrypt payload.
-    let enc_payload = &after_prefix[..pay_len + TAG_SIZE];
-    let payload = decrypt(key, nonce, enc_payload)?;
-    increment_nonce(nonce);
+    // 5. Decrypt payload (only if non-empty).
+    let payload = if pay_len > 0 {
+        let enc_payload = &after_prefix[..pay_len + TAG_SIZE];
+        let p = decrypt(key, nonce, enc_payload)?;
+        increment_nonce(nonce);
+        p
+    } else {
+        vec![]
+    };
 
     Some((meta, payload))
 }
@@ -163,7 +177,7 @@ pub fn decode_first_stream_segment(
     let mut nonce: [u8; NONCE_SIZE] = data[..NONCE_SIZE].try_into().ok()?;
     let rest = &data[NONCE_SIZE..];
     let (meta, payload) = decode_stream_segment(key, &mut nonce, rest)?;
-    // `nonce` has been incremented twice by decode_stream_segment.
+    // `nonce` has been incremented by decode_stream_segment (once if no payload, twice if payload).
     Some((nonce, meta, payload))
 }
 
@@ -194,7 +208,12 @@ pub fn encode_packet_segment(
     let enc_meta = encrypt(key, nonce, &meta_plain);
 
     // 2. Encrypt payload with the SAME nonce (stateless — no increment).
-    let enc_payload = encrypt(key, nonce, payload);
+    //    Skip if payload is empty (matches Go mieru behavior).
+    let enc_payload = if !payload.is_empty() {
+        encrypt(key, nonce, payload)
+    } else {
+        vec![]
+    };
 
     // 3. Assemble: [nonce][enc_meta][prefix_pad][enc_payload][suffix_pad]
     let mut out = Vec::with_capacity(
@@ -249,7 +268,8 @@ pub fn decode_packet_segment(
 
     // Remaining after [nonce][enc_meta].
     let rest = &data[NONCE_SIZE + METADATA_LEN + TAG_SIZE..];
-    let expected_rest = prefix_len + pay_len + TAG_SIZE + suffix_len;
+    let payload_block_len = if pay_len > 0 { pay_len + TAG_SIZE } else { 0 };
+    let expected_rest = prefix_len + payload_block_len + suffix_len;
     if rest.len() < expected_rest {
         return None;
     }
@@ -257,9 +277,13 @@ pub fn decode_packet_segment(
     // 5. Skip prefix padding.
     let after_prefix = &rest[prefix_len..];
 
-    // 6. Decrypt payload with THE SAME nonce (stateless).
-    let enc_payload = &after_prefix[..pay_len + TAG_SIZE];
-    let payload = decrypt(key, &nonce, enc_payload)?;
+    // 6. Decrypt payload with THE SAME nonce (stateless, only if non-empty).
+    let payload = if pay_len > 0 {
+        let enc_payload = &after_prefix[..pay_len + TAG_SIZE];
+        decrypt(key, &nonce, enc_payload)?
+    } else {
+        vec![]
+    };
 
     Some((nonce, meta, payload))
 }
@@ -607,6 +631,216 @@ mod tests {
 
         let (_, _, decoded_payload) = decode_packet_segment(&key, &encoded).expect("decode failed");
         assert_eq!(decoded_payload, payload);
+    }
+
+    // -----------------------------------------------------------------------
+    // Multi-segment sequential test
+    // -----------------------------------------------------------------------
+
+    // -----------------------------------------------------------------------
+    // Empty payload tests — verifies Go mieru compatibility
+    // -----------------------------------------------------------------------
+    // Go mieru skips payload encryption when payload is empty:
+    // - No encrypted payload block in the wire format (no 16-byte auth tag)
+    // - Nonce does NOT advance for the payload encryption
+    // These tests ensure our implementation matches this critical behavior.
+
+    #[test]
+    fn test_encode_stream_empty_payload_no_tag() {
+        let key = test_key();
+        let mut nonce = test_nonce();
+        let meta = sample_session_meta(0, 0); // payload_length = 0
+
+        let encoded = encode_stream_segment(&key, &mut nonce, &meta, &[], &[], &[], false);
+
+        // With empty payload: only encrypted metadata block (32 + 16 = 48 bytes)
+        // No payload ciphertext block at all (no 16-byte tag)
+        assert_eq!(
+            encoded.len(),
+            METADATA_LEN + TAG_SIZE,
+            "empty payload should produce no payload block (no tag)"
+        );
+    }
+
+    #[test]
+    fn test_encode_stream_empty_payload_nonce_advances_once() {
+        let key = test_key();
+        let original = test_nonce();
+        let mut nonce = test_nonce();
+        let meta = sample_session_meta(0, 0); // empty payload
+
+        encode_stream_segment(&key, &mut nonce, &meta, &[], &[], &[], false);
+
+        // Nonce should advance only ONCE (for metadata), NOT twice
+        let mut expected = original;
+        increment_nonce(&mut expected); // metadata only
+        assert_eq!(
+            nonce, expected,
+            "empty payload: nonce should advance once (metadata only), not twice"
+        );
+    }
+
+    #[test]
+    fn test_encode_stream_nonempty_payload_nonce_advances_twice() {
+        let key = test_key();
+        let original = test_nonce();
+        let mut nonce = test_nonce();
+        let payload = b"data";
+        let meta = sample_data_meta(0, 0, payload.len() as u16);
+
+        encode_stream_segment(&key, &mut nonce, &meta, payload, &[], &[], false);
+
+        // Non-empty payload: nonce advances twice (metadata + payload)
+        let mut expected = original;
+        increment_nonce(&mut expected);
+        increment_nonce(&mut expected);
+        assert_eq!(
+            nonce, expected,
+            "non-empty payload: nonce should advance twice"
+        );
+    }
+
+    #[test]
+    fn test_decode_stream_empty_payload_roundtrip() {
+        let key = test_key();
+        let mut enc_nonce = test_nonce();
+        let mut dec_nonce = test_nonce();
+        let meta = sample_session_meta(0, 0); // empty payload
+
+        let encoded = encode_stream_segment(&key, &mut enc_nonce, &meta, &[], &[], &[], false);
+        let (decoded_meta, decoded_payload) =
+            decode_stream_segment(&key, &mut dec_nonce, &encoded).expect("decode failed");
+
+        assert!(decoded_payload.is_empty());
+        assert_eq!(decoded_meta.session_id(), meta.session_id());
+        // Nonces must be synchronized
+        assert_eq!(enc_nonce, dec_nonce, "nonce desync after empty payload segment");
+    }
+
+    #[test]
+    fn test_stream_mixed_empty_and_nonempty_nonce_sync() {
+        // Simulates the real protocol flow:
+        // 1. OpenSessionRequest with payload (nonce +2)
+        // 2. OpenSessionResponse empty (nonce +1)
+        // 3. DataServerToClient with payload (nonce +2)
+        // This is the exact sequence that caused the nonce desync bug.
+        let key = test_key();
+        let mut enc_nonce = test_nonce();
+        // Segment 1: session open with payload (like client sending SOCKS5 addr)
+        let payload1 = b"socks5 address data";
+        let meta1 = sample_session_meta(0, payload1.len() as u16);
+        let seg1 = encode_stream_segment(&key, &mut enc_nonce, &meta1, payload1, &[], &[], true);
+        let (nonce_after, _, dec_payload1) =
+            decode_first_stream_segment(&key, &seg1).expect("seg1 decode failed");
+        let mut dec_nonce = nonce_after;
+        assert_eq!(dec_payload1, payload1);
+        assert_eq!(enc_nonce, dec_nonce, "nonce desync after segment 1");
+
+        // Segment 2: session response, EMPTY payload (the bug trigger!)
+        let meta2 = Metadata::Session(SessionMetadata {
+            protocol_type: ProtocolType::OpenSessionResponse,
+            timestamp: current_timestamp_minutes(),
+            session_id: 0xCAFE_BABE,
+            sequence: 0,
+            status_code: 0,
+            payload_length: 0,
+            suffix_padding_length: 0,
+        });
+        let seg2 = encode_stream_segment(&key, &mut enc_nonce, &meta2, &[], &[], &[], false);
+        let (dec_meta2, dec_payload2) =
+            decode_stream_segment(&key, &mut dec_nonce, &seg2).expect("seg2 decode failed");
+        assert!(dec_payload2.is_empty());
+        assert_eq!(
+            dec_meta2.protocol_type(),
+            ProtocolType::OpenSessionResponse
+        );
+        assert_eq!(enc_nonce, dec_nonce, "nonce desync after empty segment 2");
+
+        // Segment 3: data with payload (SOCKS5 response or actual data)
+        let payload3 = b"HTTP/1.1 200 OK\r\n";
+        let meta3 = sample_data_meta(0, 0, payload3.len() as u16);
+        let seg3 = encode_stream_segment(&key, &mut enc_nonce, &meta3, payload3, &[], &[], false);
+        let (_, dec_payload3) =
+            decode_stream_segment(&key, &mut dec_nonce, &seg3).expect("seg3 decode failed");
+        assert_eq!(dec_payload3, payload3);
+        assert_eq!(enc_nonce, dec_nonce, "nonce desync after segment 3");
+    }
+
+    #[test]
+    fn test_stream_multiple_empty_segments_nonce_sync() {
+        // Multiple consecutive empty segments (e.g., OpenSessionResponse + CloseSessionResponse)
+        let key = test_key();
+        let mut enc_nonce = test_nonce();
+        let mut dec_nonce = test_nonce();
+
+        for i in 0..5u32 {
+            let meta = Metadata::Session(SessionMetadata {
+                protocol_type: ProtocolType::OpenSessionResponse,
+                timestamp: current_timestamp_minutes(),
+                session_id: i,
+                sequence: 0,
+                status_code: 0,
+                payload_length: 0,
+                suffix_padding_length: 0,
+            });
+            let seg = encode_stream_segment(
+                &key,
+                &mut enc_nonce,
+                &meta,
+                &[],
+                &[],
+                &[],
+                i == 0, // first includes nonce
+            );
+
+            if i == 0 {
+                let (nonce_after, _, _) =
+                    decode_first_stream_segment(&key, &seg).expect("decode failed");
+                dec_nonce = nonce_after;
+            } else {
+                decode_stream_segment(&key, &mut dec_nonce, &seg).expect("decode failed");
+            }
+
+            assert_eq!(
+                enc_nonce, dec_nonce,
+                "nonce desync after empty segment {i}"
+            );
+        }
+    }
+
+    // -----------------------------------------------------------------------
+    // Packet (UDP) empty payload tests
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn test_encode_packet_empty_payload_no_tag() {
+        let key = test_key();
+        let nonce = test_nonce();
+        let meta = sample_session_meta(0, 0); // empty payload
+
+        let encoded = encode_packet_segment(&key, &nonce, &meta, &[], &[], &[]);
+
+        // Nonce(24) + enc_meta(32+16) = 72 bytes, NO payload block
+        assert_eq!(
+            encoded.len(),
+            NONCE_SIZE + METADATA_LEN + TAG_SIZE,
+            "UDP empty payload should produce no payload block"
+        );
+    }
+
+    #[test]
+    fn test_decode_packet_empty_payload_roundtrip() {
+        let key = test_key();
+        let nonce = test_nonce();
+        let meta = sample_session_meta(0, 0);
+
+        let encoded = encode_packet_segment(&key, &nonce, &meta, &[], &[], &[]);
+        let (dec_nonce, decoded_meta, decoded_payload) =
+            decode_packet_segment(&key, &encoded).expect("decode failed");
+
+        assert_eq!(dec_nonce, nonce);
+        assert!(decoded_payload.is_empty());
+        assert_eq!(decoded_meta.session_id(), meta.session_id());
     }
 
     // -----------------------------------------------------------------------

@@ -220,7 +220,10 @@ async fn read_first_server_segment(
         (prefix_len, payload_len, suffix_len)
     };
 
-    let remaining_len = prefix_len + payload_len + TAG_SIZE + suffix_len;
+    // Go mieru: when payload is empty, NO encrypted payload block is written (no tag).
+    // Nonce only advances for payload when payload is non-empty.
+    let payload_block_len = if payload_len > 0 { payload_len + TAG_SIZE } else { 0 };
+    let remaining_len = prefix_len + payload_block_len + suffix_len;
     let mut remaining = vec![0u8; remaining_len];
     if remaining_len > 0 {
         stream
@@ -231,11 +234,12 @@ async fn read_first_server_segment(
 
     let payload = if payload_len > 0 {
         let enc_payload = &remaining[prefix_len..prefix_len + payload_len + TAG_SIZE];
-        decrypt(key, &server_nonce, enc_payload).expect("decrypt server payload")
+        let p = decrypt(key, &server_nonce, enc_payload).expect("decrypt server payload");
+        increment_nonce(&mut server_nonce);
+        p
     } else {
         vec![]
     };
-    increment_nonce(&mut server_nonce);
 
     (server_nonce, protocol_type, session_id, payload)
 }
@@ -271,7 +275,9 @@ async fn read_server_segment(
         (prefix_len, payload_len, suffix_len)
     };
 
-    let remaining_len = prefix_len + payload_len + TAG_SIZE + suffix_len;
+    // Go mieru: when payload is empty, NO encrypted payload block is written.
+    let payload_block_len = if payload_len > 0 { payload_len + TAG_SIZE } else { 0 };
+    let remaining_len = prefix_len + payload_block_len + suffix_len;
     let mut remaining = vec![0u8; remaining_len];
     if remaining_len > 0 {
         stream
@@ -282,11 +288,12 @@ async fn read_server_segment(
 
     let payload = if payload_len > 0 {
         let enc_payload = &remaining[prefix_len..prefix_len + payload_len + TAG_SIZE];
-        decrypt(key, nonce, enc_payload).expect("decrypt server segment payload")
+        let p = decrypt(key, nonce, enc_payload).expect("decrypt server segment payload");
+        increment_nonce(nonce);
+        p
     } else {
         vec![]
     };
-    increment_nonce(nonce);
 
     (protocol_type, session_id, payload)
 }
@@ -295,16 +302,24 @@ async fn read_server_segment(
 // SOCKS5 address encoding
 // ---------------------------------------------------------------------------
 
-fn encode_socks5_ipv4(ip: [u8; 4], port: u16) -> Vec<u8> {
-    let mut buf = Vec::with_capacity(7);
+/// Encode a full SOCKS5 CONNECT request: [version=0x05, command=0x01, reserved=0x00, addr...]
+/// This matches what real Go mieru clients send via `Request.WriteToSocks5()`.
+fn encode_socks5_connect_ipv4(ip: [u8; 4], port: u16) -> Vec<u8> {
+    let mut buf = Vec::with_capacity(10);
+    buf.push(0x05); // SOCKS5 version
+    buf.push(0x01); // CONNECT command
+    buf.push(0x00); // reserved
     buf.push(0x01); // IPv4
     buf.extend_from_slice(&ip);
     buf.extend_from_slice(&port.to_be_bytes());
     buf
 }
 
-fn encode_socks5_domain(domain: &str, port: u16) -> Vec<u8> {
-    let mut buf = Vec::with_capacity(1 + 1 + domain.len() + 2);
+fn encode_socks5_connect_domain(domain: &str, port: u16) -> Vec<u8> {
+    let mut buf = Vec::with_capacity(4 + 1 + domain.len() + 2);
+    buf.push(0x05); // SOCKS5 version
+    buf.push(0x01); // CONNECT command
+    buf.push(0x00); // reserved
     buf.push(0x03); // domain
     buf.push(domain.len() as u8);
     buf.extend_from_slice(domain.as_bytes());
@@ -386,7 +401,7 @@ async fn test_e2e_tcp_proxy_echo() {
 
     // 5. Send OpenSessionRequest with SOCKS5 address pointing to echo server
     let session_id: u32 = 0x0000_0001;
-    let socks_addr = encode_socks5_ipv4([127, 0, 0, 1], echo_port);
+    let socks_addr = encode_socks5_connect_ipv4([127, 0, 0, 1], echo_port);
     let first_segment = encode_open_session(&key, &mut client_nonce, session_id, &socks_addr);
     stream
         .write_all(&first_segment)
@@ -405,6 +420,20 @@ async fn test_e2e_tcp_proxy_echo() {
     assert_eq!(proto_type, 3, "expected OpenSessionResponse (type=3)");
     assert_eq!(resp_session_id, session_id, "session ID mismatch");
     println!("Session opened successfully!");
+
+    // 6b. Read SOCKS5 response from server (DataServerToClient with 10-byte SOCKS5 reply)
+    // Real Go mieru clients block here until they receive the SOCKS5 response.
+    let (socks_proto_type, _socks_sid, socks_payload) = tokio::time::timeout(
+        Duration::from_secs(5),
+        read_server_segment(&mut stream, &key, &mut server_nonce),
+    )
+    .await
+    .expect("read SOCKS5 response timeout");
+    assert_eq!(socks_proto_type, 7, "expected DataServerToClient for SOCKS5 response");
+    assert!(socks_payload.len() >= 4, "SOCKS5 response too short");
+    assert_eq!(socks_payload[0], 0x05, "SOCKS5 version");
+    assert_eq!(socks_payload[1], 0x00, "SOCKS5 success reply");
+    println!("Got SOCKS5 response: {:02x?}", &socks_payload);
 
     // 7. Send test data through the proxy
     let test_data = b"Hello from mieru e2e test!";
@@ -474,7 +503,7 @@ async fn test_e2e_tcp_proxy_http() {
 
     // Target: httpbin.org:80 (or use a known reachable host)
     let session_id: u32 = 0x0000_0002;
-    let socks_addr = encode_socks5_domain("httpbin.org", 80);
+    let socks_addr = encode_socks5_connect_domain("httpbin.org", 80);
     let http_request = b"GET /get HTTP/1.1\r\nHost: httpbin.org\r\nConnection: close\r\n\r\n";
 
     // Combine socks addr + HTTP request as the first session payload
@@ -497,6 +526,17 @@ async fn test_e2e_tcp_proxy_http() {
     .expect("timeout");
     assert_eq!(proto_type, 3, "expected OpenSessionResponse");
     println!("Session opened to httpbin.org:80");
+
+    // Read SOCKS5 response (DataServerToClient)
+    let (_socks_pt, _socks_sid, socks_resp) = tokio::time::timeout(
+        Duration::from_secs(5),
+        read_server_segment(&mut stream, &key, &mut server_nonce),
+    )
+    .await
+    .expect("SOCKS5 response timeout");
+    assert_eq!(socks_resp[0], 0x05, "SOCKS5 version");
+    assert_eq!(socks_resp[1], 0x00, "SOCKS5 success reply");
+    println!("Got SOCKS5 response");
 
     // Send HTTP request as data segment
     let data_segment = encode_data_segment(&key, &mut client_nonce, session_id, 1, http_request);
@@ -630,13 +670,12 @@ fn encode_udp_close_session(key: &[u8; KEY_LEN], username: &str, session_id: u32
     meta[2..6].copy_from_slice(&current_timestamp_minutes().to_be_bytes());
     meta[6..10].copy_from_slice(&session_id.to_be_bytes());
 
+    // Go mieru: empty payload → no encrypted payload block at all
     let enc_meta = encrypt(key, &nonce, &meta);
-    let enc_payload = encrypt(key, &nonce, &[]); // empty payload
 
     let mut out = Vec::new();
     out.extend_from_slice(&nonce);
     out.extend_from_slice(&enc_meta);
-    out.extend_from_slice(&enc_payload);
     out
 }
 
@@ -673,7 +712,9 @@ fn decode_udp_response(key: &[u8; KEY_LEN], data: &[u8]) -> Option<(u8, u32, u32
     };
 
     let rest = &data[NONCE_SIZE + METADATA_LEN + TAG_SIZE..];
-    let expected = prefix_len + payload_len + TAG_SIZE + suffix_len;
+    // Go mieru: when payload is empty, no encrypted payload block exists
+    let payload_block_len = if payload_len > 0 { payload_len + TAG_SIZE } else { 0 };
+    let expected = prefix_len + payload_block_len + suffix_len;
     if rest.len() < expected {
         return None;
     }
@@ -720,7 +761,7 @@ async fn test_e2e_udp_proxy_echo() {
 
     // 4. Send OpenSessionRequest with SOCKS5 address
     let session_id: u32 = 0x0000_0010;
-    let socks_addr = encode_socks5_ipv4([127, 0, 0, 1], echo_port);
+    let socks_addr = encode_socks5_connect_ipv4([127, 0, 0, 1], echo_port);
     let open_packet = encode_udp_open_session(&key, &uuid, session_id, &socks_addr);
     client_socket
         .send(&open_packet)
@@ -833,7 +874,7 @@ async fn test_e2e_udp_proxy_stress() {
         let session_id = 0x1000 + s;
 
         // Open session
-        let socks_addr = encode_socks5_ipv4([127, 0, 0, 1], echo_port);
+        let socks_addr = encode_socks5_connect_ipv4([127, 0, 0, 1], echo_port);
         let open_pkt = encode_udp_open_session(&key, &uuid, session_id, &socks_addr);
         client_socket.send(&open_pkt).await.unwrap();
 
@@ -988,7 +1029,7 @@ async fn test_e2e_tcp_proxy_stress() {
                 .expect("connect failed");
 
         let session_id: u32 = 0xAA00_0000 + c;
-        let socks_addr = encode_socks5_ipv4([127, 0, 0, 1], echo_port);
+        let socks_addr = encode_socks5_connect_ipv4([127, 0, 0, 1], echo_port);
         let first_seg = encode_open_session(&key, &mut client_nonce, session_id, &socks_addr);
         stream.write_all(&first_seg).await.unwrap();
 
@@ -1000,6 +1041,16 @@ async fn test_e2e_tcp_proxy_stress() {
         .expect("open timeout");
         assert_eq!(pt, 3);
         assert_eq!(sid, session_id);
+
+        // Read SOCKS5 response before sending data
+        let (socks_pt, _, socks_payload) = tokio::time::timeout(
+            Duration::from_secs(5),
+            read_server_segment(&mut stream, &key, &mut server_nonce),
+        )
+        .await
+        .expect("SOCKS5 response timeout in stress test");
+        assert_eq!(socks_pt, 7);
+        assert_eq!(socks_payload[1], 0x00, "SOCKS5 success");
 
         let mut conn_passed = 0u32;
         let mut conn_failed = 0u32;
