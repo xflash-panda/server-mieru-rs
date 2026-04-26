@@ -11,7 +11,7 @@ use tokio::sync::mpsc;
 use tokio_util::sync::CancellationToken;
 
 use crate::acl::{self, OutboundType};
-use crate::business::{self, StatsCollector, UserId};
+use crate::business::{self, MieruUserManager, StatsCollector, UserId};
 use crate::connection::{ConnectionGuard, ConnectionManager};
 use crate::core::crypto::KEY_LEN;
 use crate::core::metadata::{DataMetadata, Metadata, ProtocolType, current_timestamp_minutes};
@@ -27,6 +27,7 @@ use crate::outbound;
 
 const IDLE_SESSION_TIMEOUT: Duration = Duration::from_secs(60);
 const CLEANUP_INTERVAL: Duration = Duration::from_secs(5);
+const REGISTRY_REFRESH_INTERVAL: Duration = Duration::from_secs(30);
 const OUTPUT_INTERVAL: Duration = Duration::from_millis(1);
 const CONNECT_TIMEOUT: Duration = Duration::from_secs(10);
 const RECV_BUF_CAPACITY: usize = 1024;
@@ -76,18 +77,21 @@ impl UdpRelay {
     /// Main event loop. Runs until cancelled.
     pub async fn run(
         mut self,
-        registry: Arc<UserRegistry>,
+        user_manager: Arc<MieruUserManager>,
         stats: Arc<dyn StatsCollector>,
         router: Arc<dyn acl::OutboundRouter>,
         conn_mgr: ConnectionManager,
         cancel: CancellationToken,
         relay_idle_timeout: Duration,
     ) {
+        let mut registry = Arc::new(UserRegistry::from_user_manager(&user_manager));
         let mut buf = vec![0u8; UDP_BUF_SIZE];
         let mut output_tick = tokio::time::interval(OUTPUT_INTERVAL);
         let mut cleanup_tick = tokio::time::interval(CLEANUP_INTERVAL);
+        let mut registry_tick = tokio::time::interval(REGISTRY_REFRESH_INTERVAL);
         output_tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
         cleanup_tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
+        registry_tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
 
         loop {
             tokio::select! {
@@ -118,6 +122,9 @@ impl UdpRelay {
                 }
                 _ = cleanup_tick.tick() => {
                     self.cleanup_idle_sessions();
+                }
+                _ = registry_tick.tick() => {
+                    registry = Arc::new(UserRegistry::from_user_manager(&user_manager));
                 }
                 _ = cancel.cancelled() => {
                     break;
