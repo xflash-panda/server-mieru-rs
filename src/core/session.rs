@@ -16,6 +16,7 @@ use tokio_util::sync::{CancellationToken, PollSender};
 use crate::core::metadata::{
     DataMetadata, Metadata, ProtocolType, SessionMetadata, current_timestamp_minutes,
 };
+use crate::core::padding;
 
 // ---------------------------------------------------------------------------
 // Types
@@ -26,6 +27,8 @@ use crate::core::metadata::{
 pub struct OutboundSegment {
     pub metadata: Metadata,
     pub payload: Vec<u8>,
+    pub prefix_padding: Vec<u8>,
+    pub suffix_padding: Vec<u8>,
 }
 
 /// Handle to an active session held by the manager.
@@ -116,6 +119,7 @@ impl SessionManager {
                 }
 
                 // Send OpenSessionResponse back to the client.
+                let suffix_pad = padding::session_padding(0);
                 let response_meta = Metadata::Session(SessionMetadata {
                     protocol_type: ProtocolType::OpenSessionResponse,
                     timestamp: current_timestamp_minutes(),
@@ -123,11 +127,13 @@ impl SessionManager {
                     sequence: 0,
                     status_code: 0,
                     payload_length: 0,
-                    suffix_padding_length: 0,
+                    suffix_padding_length: suffix_pad.len() as u8,
                 });
                 let _ = self.outbound_tx.try_send(OutboundSegment {
                     metadata: response_meta,
                     payload: vec![],
+                    suffix_padding: suffix_pad,
+                    prefix_padding: vec![],
                 });
 
                 let outbound_tx = self.outbound_tx.clone();
@@ -171,6 +177,7 @@ impl SessionManager {
         if let Some(entry) = self.sessions.remove(&session_id) {
             entry.cancel.cancel();
             // Send close response.
+            let suffix_pad = padding::session_padding(0);
             let close_meta = Metadata::Session(SessionMetadata {
                 protocol_type: ProtocolType::CloseSessionResponse,
                 timestamp: current_timestamp_minutes(),
@@ -178,11 +185,13 @@ impl SessionManager {
                 sequence: 0,
                 status_code: 0,
                 payload_length: 0,
-                suffix_padding_length: 0,
+                suffix_padding_length: suffix_pad.len() as u8,
             });
             let _ = self.outbound_tx.try_send(OutboundSegment {
                 metadata: close_meta,
                 payload: vec![],
+                suffix_padding: suffix_pad,
+                prefix_padding: vec![],
             });
         }
     }
@@ -219,6 +228,7 @@ impl SessionStream {
         let seq = self.next_seq;
         self.next_seq = self.next_seq.wrapping_add(1);
 
+        let (prefix_pad, suffix_pad) = padding::data_padding(payload.len());
         let meta = Metadata::Data(DataMetadata {
             protocol_type: ProtocolType::DataServerToClient,
             timestamp: current_timestamp_minutes(),
@@ -227,15 +237,17 @@ impl SessionStream {
             unack_seq: 0,
             window_size: 256,
             fragment_number: 0,
-            prefix_padding_length: 0,
+            prefix_padding_length: prefix_pad.len() as u8,
             payload_length: payload.len() as u16,
-            suffix_padding_length: 0,
+            suffix_padding_length: suffix_pad.len() as u8,
         });
 
         self.outbound_tx
             .send(OutboundSegment {
                 metadata: meta,
                 payload,
+                prefix_padding: prefix_pad,
+                suffix_padding: suffix_pad,
             })
             .await
     }
@@ -323,6 +335,7 @@ impl tokio::io::AsyncWrite for SessionStream {
         let payload = buf.to_vec();
         let payload_len = payload.len();
 
+        let (prefix_pad, suffix_pad) = padding::data_padding(payload_len);
         let meta = Metadata::Data(DataMetadata {
             protocol_type: ProtocolType::DataServerToClient,
             timestamp: current_timestamp_minutes(),
@@ -331,14 +344,16 @@ impl tokio::io::AsyncWrite for SessionStream {
             unack_seq: 0,
             window_size: 256,
             fragment_number: 0,
-            prefix_padding_length: 0,
+            prefix_padding_length: prefix_pad.len() as u8,
             payload_length: payload_len as u16,
-            suffix_padding_length: 0,
+            suffix_padding_length: suffix_pad.len() as u8,
         });
 
         let segment = OutboundSegment {
             metadata: meta,
             payload,
+            prefix_padding: prefix_pad,
+            suffix_padding: suffix_pad,
         };
 
         match self.poll_sender.send_item(segment) {
@@ -486,6 +501,59 @@ mod tests {
         // Close all.
         mgr.close_all();
         assert_eq!(mgr.session_count(), 0);
+    }
+
+    #[tokio::test]
+    async fn test_outbound_data_segments_have_padding() {
+        // Go always sends padding on data segments: prefix + suffix.
+        // Server outbound DataServerToClient segments should have non-zero
+        // padding lengths to match Go's behavior for traffic obfuscation.
+        let (mut mgr, mut outbound_rx) = SessionManager::new();
+
+        let meta = open_session_meta(88);
+        let mut stream = mgr.dispatch(&meta, vec![]).unwrap();
+        let _ = outbound_rx.try_recv(); // consume open response
+
+        let payload = b"test payload for padding check".to_vec();
+        stream
+            .send(payload.clone())
+            .await
+            .expect("send should succeed");
+
+        let seg = outbound_rx.try_recv().expect("expected data segment");
+        match &seg.metadata {
+            Metadata::Data(d) => {
+                // At least one of prefix or suffix padding should be non-zero.
+                assert!(
+                    d.prefix_padding_length > 0 || d.suffix_padding_length > 0,
+                    "server should send padding on data segments (prefix={}, suffix={})",
+                    d.prefix_padding_length,
+                    d.suffix_padding_length
+                );
+            }
+            _ => panic!("expected Data metadata"),
+        }
+    }
+
+    #[tokio::test]
+    async fn test_outbound_session_segments_have_padding() {
+        // Go always sends suffix padding on session control segments.
+        let (mut mgr, mut outbound_rx) = SessionManager::new();
+
+        let meta = open_session_meta(89);
+        let _stream = mgr.dispatch(&meta, vec![]);
+
+        let seg = outbound_rx.try_recv().expect("expected open response");
+        match &seg.metadata {
+            Metadata::Session(s) => {
+                assert!(
+                    s.suffix_padding_length > 0,
+                    "server should send suffix padding on session segments (suffix={})",
+                    s.suffix_padding_length
+                );
+            }
+            _ => panic!("expected Session metadata"),
+        }
     }
 
     #[tokio::test]

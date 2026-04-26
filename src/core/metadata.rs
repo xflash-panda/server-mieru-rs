@@ -71,7 +71,16 @@ pub struct SessionMetadata {
     pub suffix_padding_length: u8,
 }
 
+/// Maximum allowed clock skew for metadata timestamps, in minutes.
+/// Go uses `mathext.WithinRange(currentTimestamp, originalTimestamp, 1)`.
+const TIMESTAMP_TOLERANCE_MINUTES: u32 = 1;
+
 impl SessionMetadata {
+    /// Check if the timestamp is within ±1 minute of the current time.
+    pub fn is_timestamp_valid(&self) -> bool {
+        is_timestamp_within_tolerance(self.timestamp)
+    }
+
     pub fn encode(&self) -> [u8; METADATA_LEN] {
         let mut buf = [0u8; METADATA_LEN];
         buf[0] = self.protocol_type as u8;
@@ -141,6 +150,11 @@ pub struct DataMetadata {
 }
 
 impl DataMetadata {
+    /// Check if the timestamp is within ±1 minute of the current time.
+    pub fn is_timestamp_valid(&self) -> bool {
+        is_timestamp_within_tolerance(self.timestamp)
+    }
+
     pub fn encode(&self) -> [u8; METADATA_LEN] {
         let mut buf = [0u8; METADATA_LEN];
         buf[0] = self.protocol_type as u8;
@@ -221,6 +235,14 @@ impl Metadata {
         }
     }
 
+    /// Check if the timestamp is within ±1 minute of the current time.
+    pub fn is_timestamp_valid(&self) -> bool {
+        match self {
+            Metadata::Session(s) => s.is_timestamp_valid(),
+            Metadata::Data(d) => d.is_timestamp_valid(),
+        }
+    }
+
     /// Return the protocol type from either variant.
     pub fn protocol_type(&self) -> ProtocolType {
         match self {
@@ -228,6 +250,11 @@ impl Metadata {
             Metadata::Data(d) => d.protocol_type,
         }
     }
+}
+
+fn is_timestamp_within_tolerance(ts: u32) -> bool {
+    let now = current_timestamp_minutes();
+    now.abs_diff(ts) <= TIMESTAMP_TOLERANCE_MINUTES
 }
 
 /// Returns the current unix time expressed in whole minutes.
@@ -526,6 +553,39 @@ mod tests {
     }
 
     // ── Timestamp ────────────────────────────────────────────────────────────
+
+    #[test]
+    fn test_session_metadata_validate_timestamp_rejects_stale() {
+        // Go validates metadata timestamps within ±1 minute.
+        // A timestamp from the past (e.g., 0) should be rejected.
+        let mut m = sample_session();
+        m.timestamp = 0; // Unix epoch — clearly stale
+        assert!(
+            !m.is_timestamp_valid(),
+            "stale timestamp (0) should be rejected"
+        );
+    }
+
+    #[test]
+    fn test_session_metadata_validate_timestamp_accepts_current() {
+        let mut m = sample_session();
+        m.timestamp = current_timestamp_minutes();
+        assert!(
+            m.is_timestamp_valid(),
+            "current timestamp should be accepted"
+        );
+    }
+
+    #[test]
+    fn test_data_metadata_validate_timestamp_rejects_future() {
+        // A timestamp far in the future should also be rejected.
+        let mut m = sample_data();
+        m.timestamp = current_timestamp_minutes() + 10; // 10 minutes in future
+        assert!(
+            !m.is_timestamp_valid(),
+            "future timestamp (+10 min) should be rejected"
+        );
+    }
 
     #[test]
     fn test_current_timestamp_minutes_reasonable() {

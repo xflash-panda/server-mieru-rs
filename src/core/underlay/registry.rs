@@ -107,7 +107,7 @@ mod tests {
         // Encrypt a valid metadata block.
         let meta = SessionMetadata {
             protocol_type: ProtocolType::OpenSessionRequest,
-            timestamp: 28_000_000,
+            timestamp: crate::core::metadata::current_timestamp_minutes(),
             session_id: 0xDEAD_BEEF,
             sequence: 0,
             status_code: 0,
