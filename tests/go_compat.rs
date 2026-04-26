@@ -569,14 +569,10 @@ fn go_compat_tcp_nonce_sync_10_segments() {
         decode_first_stream_segment(&key, &segments[0].0).expect("decode seg 0");
     assert_eq!(dec_payload, segments[0].1.as_bytes());
 
-    for i in 1..10 {
-        let (_, dec_payload) =
-            decode_stream_segment(&key, &mut dec_nonce, &segments[i].0).expect(&format!("seg {i}"));
-        assert_eq!(
-            dec_payload,
-            segments[i].1.as_bytes(),
-            "payload mismatch seg {i}"
-        );
+    for (i, (seg_wire, seg_text)) in segments.iter().enumerate().skip(1) {
+        let (_, dec_payload) = decode_stream_segment(&key, &mut dec_nonce, seg_wire)
+            .unwrap_or_else(|| panic!("seg {i}"));
+        assert_eq!(dec_payload, seg_text.as_bytes(), "payload mismatch seg {i}");
     }
 
     assert_eq!(enc_nonce, dec_nonce, "nonce desync after 10 segments");
@@ -641,8 +637,8 @@ fn go_compat_tcp_nonce_sync_with_empty_payloads() {
     assert_eq!(p, payloads[0]);
 
     for i in 1..5 {
-        let (_, p) =
-            decode_stream_segment(&key, &mut dec_nonce, &segments[i]).expect(&format!("seg {i}"));
+        let (_, p) = decode_stream_segment(&key, &mut dec_nonce, &segments[i])
+            .unwrap_or_else(|| panic!("seg {i}"));
         assert_eq!(p, payloads[i], "payload mismatch seg {i}");
     }
 
