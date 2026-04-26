@@ -128,6 +128,7 @@ impl UdpRelay {
         self.session_manager.close_all();
     }
 
+    #[allow(clippy::too_many_arguments)]
     async fn handle_incoming(
         &mut self,
         packet: &[u8],
@@ -208,7 +209,8 @@ impl UdpRelay {
                     let router = Arc::clone(router);
                     let stats = Arc::clone(stats);
                     tokio::spawn(async move {
-                        handle_session(stream, &*router, user_id, &*stats, relay_idle_timeout).await;
+                        handle_session(stream, &*router, user_id, &*stats, relay_idle_timeout)
+                            .await;
                     });
                 }
             }
@@ -433,12 +435,8 @@ pub async fn handle_session(
                         tracing::debug!(error = %e, "Failed to send initial data");
                         return;
                     }
-                    crate::relay::relay_with_idle_timeout(
-                        session,
-                        remote,
-                        relay_idle_timeout,
-                    )
-                    .await;
+                    crate::relay::relay_with_idle_timeout(session, remote, relay_idle_timeout)
+                        .await;
                 }
                 Err(e) => {
                     tracing::debug!(target = %target, error = %e, "Failed to connect");

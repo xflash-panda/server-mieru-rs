@@ -199,7 +199,16 @@ async fn main() -> Result<()> {
             tokio::spawn(async move {
                 let registry = Arc::new(UserRegistry::from_user_manager(&user_mgr));
                 let relay = core::underlay::udp_relay::UdpRelay::new(socket);
-                relay.run(registry, stats, router, conn_mgr, cancel, relay_idle_timeout).await;
+                relay
+                    .run(
+                        registry,
+                        stats,
+                        router,
+                        conn_mgr,
+                        cancel,
+                        relay_idle_timeout,
+                    )
+                    .await;
             });
         }
     }
@@ -283,7 +292,14 @@ async fn handle_tcp_connection(
         let router = Arc::clone(router);
         let stats = Arc::clone(stats);
         tokio::spawn(async move {
-            handle_session(session_stream, &*router, user_id, &*stats, relay_idle_timeout).await;
+            handle_session(
+                session_stream,
+                &*router,
+                user_id,
+                &*stats,
+                relay_idle_timeout,
+            )
+            .await;
         });
     }
 
