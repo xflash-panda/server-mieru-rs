@@ -81,6 +81,17 @@ pub struct CliArgs {
     )]
     pub max_connections: usize,
 
+    /// Maximum time a relay may be idle (no bytes in either direction) before
+    /// being terminated. Prevents connections from hanging indefinitely.
+    #[arg(
+        long,
+        env = "X_PANDA_MIERU_RELAY_IDLE_TIMEOUT",
+        default_value = "100s",
+        value_parser = parse_duration,
+        help_heading = "Performance"
+    )]
+    pub relay_idle_timeout: Duration,
+
     /// IP version preference for panel API connections (auto, v4, v6).
     #[arg(
         long,
@@ -223,6 +234,7 @@ mod tests {
             block_private_ip: true,
             refresh_geodata: false,
             max_connections: 10000,
+            relay_idle_timeout: Duration::from_secs(100),
             panel_ip_version: IpVersion::V4,
         }
     }
