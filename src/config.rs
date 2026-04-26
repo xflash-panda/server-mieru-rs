@@ -66,10 +66,10 @@ pub struct CliArgs {
     #[arg(long, env = "X_PANDA_MIERU_ACL_CONF_FILE")]
     pub acl_conf_file: Option<PathBuf>,
 
-    #[arg(long, env = "X_PANDA_MIERU_BLOCK_PRIVATE_IP", default_value_t = true)]
+    #[arg(long, env = "X_PANDA_MIERU_BLOCK_PRIVATE_IP", default_value_t = true, action = clap::ArgAction::Set)]
     pub block_private_ip: bool,
 
-    #[arg(long, env = "X_PANDA_MIERU_REFRESH_GEODATA", default_value_t = false)]
+    #[arg(long, env = "X_PANDA_MIERU_REFRESH_GEODATA", default_value_t = false, action = clap::ArgAction::Set)]
     pub refresh_geodata: bool,
 
     /// Maximum number of concurrent connections.
