@@ -1,3 +1,4 @@
+use logger::log;
 use server_mieru_rs::acl;
 use server_mieru_rs::business;
 use server_mieru_rs::config;
@@ -5,7 +6,6 @@ use server_mieru_rs::connection;
 use server_mieru_rs::core;
 use server_mieru_rs::logger;
 use server_mieru_rs::net;
-use logger::log;
 
 use anyhow::Result;
 use std::sync::Arc;
@@ -326,4 +326,3 @@ async fn handle_tcp_connection(
     session_mgr.close_all();
     Ok(())
 }
-

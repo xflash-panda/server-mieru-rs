@@ -272,7 +272,9 @@ pub fn decode_packet_segment(
 mod tests {
     use super::*;
     use crate::core::crypto::{derive_key, hashed_password, time_salt};
-    use crate::core::metadata::{DataMetadata, ProtocolType, SessionMetadata, current_timestamp_minutes};
+    use crate::core::metadata::{
+        DataMetadata, ProtocolType, SessionMetadata, current_timestamp_minutes,
+    };
 
     fn test_key() -> [u8; KEY_LEN] {
         let pw = hashed_password("testuser", "testpass");

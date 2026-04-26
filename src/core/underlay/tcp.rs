@@ -245,7 +245,9 @@ mod tests {
     use super::*;
     use crate::business::mieru_hashed_password;
     use crate::core::crypto::{derive_key, embed_user_hint, increment_nonce, time_slots_now};
-    use crate::core::metadata::{DataMetadata, Metadata, ProtocolType, SessionMetadata, current_timestamp_minutes};
+    use crate::core::metadata::{
+        DataMetadata, Metadata, ProtocolType, SessionMetadata, current_timestamp_minutes,
+    };
 
     fn test_key() -> [u8; KEY_LEN] {
         let pw = crate::core::crypto::hashed_password("testuser", "testpass");
@@ -388,7 +390,10 @@ mod tests {
         let nonce_bytes: [u8; NONCE_SIZE] = first_segment[..NONCE_SIZE].try_into().unwrap();
         let enc_meta_bytes = &first_segment[NONCE_SIZE..NONCE_SIZE + METADATA_LEN + TAG_SIZE];
         let auth_result = registry.authenticate(&nonce_bytes, enc_meta_bytes);
-        assert!(auth_result.is_some(), "auth should still succeed (key is valid)");
+        assert!(
+            auth_result.is_some(),
+            "auth should still succeed (key is valid)"
+        );
 
         // But full decode+validate should reject it.
         let result = decode_test_first_segment(&client_key, &first_segment);
