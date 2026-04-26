@@ -7,7 +7,7 @@ use std::time::Duration;
 use tokio::io::{AsyncRead, AsyncWrite, ReadBuf};
 
 /// Buffer size for each direction of `copy_bidirectional` relay.
-const RELAY_BUF_SIZE: usize = 8 * 1024;
+const RELAY_BUF_SIZE: usize = 32 * 1024;
 
 /// Wrapper that counts bytes written through an `AsyncWrite`, used by the
 /// idle watchdog to detect stalled connections.
