@@ -42,6 +42,18 @@ pub fn encode_response_packet(key: &[u8; KEY_LEN], metadata: &Metadata, payload:
     encode_packet_segment(key, &nonce, metadata, payload, &[], &[])
 }
 
+/// Encode a response UDP packet with padding.
+pub fn encode_response_packet_with_padding(
+    key: &[u8; KEY_LEN],
+    metadata: &Metadata,
+    payload: &[u8],
+    prefix_padding: &[u8],
+    suffix_padding: &[u8],
+) -> Vec<u8> {
+    let nonce = generate_random_nonce();
+    encode_packet_segment(key, &nonce, metadata, payload, prefix_padding, suffix_padding)
+}
+
 /// Encode a response UDP packet with a specific nonce (useful for testing).
 pub fn encode_response_packet_with_nonce(
     key: &[u8; KEY_LEN],
@@ -90,7 +102,7 @@ mod tests {
 
         let meta = Metadata::Data(DataMetadata {
             protocol_type: ProtocolType::DataClientToServer,
-            timestamp: 28_000_000,
+            timestamp: crate::core::metadata::current_timestamp_minutes(),
             session_id: 0xBEEF_CAFE,
             sequence: 1,
             unack_seq: 0,
@@ -115,7 +127,7 @@ mod tests {
         let payload = b"udp roundtrip data";
         let meta = Metadata::Data(DataMetadata {
             protocol_type: ProtocolType::DataClientToServer,
-            timestamp: 28_000_000,
+            timestamp: crate::core::metadata::current_timestamp_minutes(),
             session_id: 0xAAAA_BBBB,
             sequence: 5,
             unack_seq: 4,
@@ -171,12 +183,40 @@ mod tests {
     }
 
     #[test]
+    fn test_udp_encode_response_packet_with_padding() {
+        let key = derive_test_key("padding-uuid");
+        let payload = b"padded response";
+        let prefix_pad = vec![0xAAu8; 10];
+        let suffix_pad = vec![0xBBu8; 5];
+        let meta = Metadata::Data(DataMetadata {
+            protocol_type: ProtocolType::DataServerToClient,
+            timestamp: crate::core::metadata::current_timestamp_minutes(),
+            session_id: 0xABCD_EF01,
+            sequence: 1,
+            unack_seq: 0,
+            window_size: 256,
+            fragment_number: 0,
+            prefix_padding_length: prefix_pad.len() as u8,
+            payload_length: payload.len() as u16,
+            suffix_padding_length: suffix_pad.len() as u8,
+        });
+
+        let encoded = encode_response_packet_with_padding(&key, &meta, payload, &prefix_pad, &suffix_pad);
+
+        // Should be decodable
+        let (_, dec_meta, dec_payload) =
+            decode_packet_segment(&key, &encoded).expect("padded response decode failed");
+        assert_eq!(dec_payload, payload);
+        assert_eq!(dec_meta.session_id(), 0xABCD_EF01);
+    }
+
+    #[test]
     fn test_udp_encode_response_packet() {
         let key = derive_test_key("response-uuid");
         let payload = b"response data";
         let meta = Metadata::Session(SessionMetadata {
             protocol_type: ProtocolType::OpenSessionResponse,
-            timestamp: 28_000_000,
+            timestamp: crate::core::metadata::current_timestamp_minutes(),
             session_id: 0x1234_5678,
             sequence: 0,
             status_code: 0,
