@@ -1,0 +1,9 @@
+/target
+Cargo.lock
+
+# Superpowers plans and specs
+docs/superpowers/
+
+# Claude rules and memory
+CLAUDE.md
+.claude/
