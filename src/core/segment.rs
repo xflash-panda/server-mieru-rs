@@ -120,7 +120,12 @@ pub fn decode_stream_segment(
     let meta = Metadata::decode(&meta_arr)?;
     increment_nonce(nonce);
 
-    // 2. Determine padding and payload sizes from decrypted metadata.
+    // 2. Validate timestamp (±1 minute tolerance, matching Go behavior).
+    if !meta.is_timestamp_valid() {
+        return None;
+    }
+
+    // 3. Determine padding and payload sizes from decrypted metadata.
     let (prefix_len, suffix_len) = padding_lengths(&meta);
     let pay_len = payload_length(&meta);
 
@@ -133,10 +138,10 @@ pub fn decode_stream_segment(
         return None;
     }
 
-    // 3. Skip prefix padding.
+    // 4. Skip prefix padding.
     let after_prefix = &rest[prefix_len..];
 
-    // 4. Decrypt payload.
+    // 5. Decrypt payload.
     let enc_payload = &after_prefix[..pay_len + TAG_SIZE];
     let payload = decrypt(key, nonce, enc_payload)?;
     increment_nonce(nonce);
@@ -233,7 +238,12 @@ pub fn decode_packet_segment(
     let meta_arr: [u8; METADATA_LEN] = meta_plain.try_into().ok()?;
     let meta = Metadata::decode(&meta_arr)?;
 
-    // 3. Determine padding and payload sizes.
+    // 3. Validate timestamp (±1 minute tolerance, matching Go behavior).
+    if !meta.is_timestamp_valid() {
+        return None;
+    }
+
+    // 4. Determine padding and payload sizes.
     let (prefix_len, suffix_len) = padding_lengths(&meta);
     let pay_len = payload_length(&meta);
 
@@ -244,10 +254,10 @@ pub fn decode_packet_segment(
         return None;
     }
 
-    // 4. Skip prefix padding.
+    // 5. Skip prefix padding.
     let after_prefix = &rest[prefix_len..];
 
-    // 5. Decrypt payload with THE SAME nonce (stateless).
+    // 6. Decrypt payload with THE SAME nonce (stateless).
     let enc_payload = &after_prefix[..pay_len + TAG_SIZE];
     let payload = decrypt(key, &nonce, enc_payload)?;
 
@@ -262,7 +272,7 @@ pub fn decode_packet_segment(
 mod tests {
     use super::*;
     use crate::core::crypto::{derive_key, hashed_password, time_salt};
-    use crate::core::metadata::{DataMetadata, ProtocolType, SessionMetadata};
+    use crate::core::metadata::{DataMetadata, ProtocolType, SessionMetadata, current_timestamp_minutes};
 
     fn test_key() -> [u8; KEY_LEN] {
         let pw = hashed_password("testuser", "testpass");
@@ -281,7 +291,7 @@ mod tests {
     fn sample_data_meta(prefix: u8, suffix: u8, payload_len: u16) -> Metadata {
         Metadata::Data(DataMetadata {
             protocol_type: ProtocolType::DataClientToServer,
-            timestamp: 28_000_000,
+            timestamp: current_timestamp_minutes(),
             session_id: 0xDEAD_BEEF,
             sequence: 1,
             unack_seq: 0,
@@ -296,7 +306,7 @@ mod tests {
     fn sample_session_meta(suffix: u8, payload_len: u16) -> Metadata {
         Metadata::Session(SessionMetadata {
             protocol_type: ProtocolType::OpenSessionRequest,
-            timestamp: 28_000_000,
+            timestamp: current_timestamp_minutes(),
             session_id: 0xCAFE_BABE,
             sequence: 0,
             status_code: 0,

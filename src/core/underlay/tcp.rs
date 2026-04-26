@@ -156,6 +156,8 @@ impl TcpUnderlay {
         stream: &mut TcpStream,
         metadata: &Metadata,
         payload: &[u8],
+        prefix_padding: &[u8],
+        suffix_padding: &[u8],
     ) -> Result<()> {
         let include_nonce = self.first_send;
         let encoded = encode_stream_segment(
@@ -163,8 +165,8 @@ impl TcpUnderlay {
             &mut self.send_nonce,
             metadata,
             payload,
-            &[], // no prefix padding (server doesn't pad for simplicity)
-            &[], // no suffix padding
+            prefix_padding,
+            suffix_padding,
             include_nonce,
         );
         stream.write_all(&encoded).await?;
@@ -243,7 +245,7 @@ mod tests {
     use super::*;
     use crate::business::mieru_hashed_password;
     use crate::core::crypto::{derive_key, embed_user_hint, increment_nonce, time_slots_now};
-    use crate::core::metadata::{DataMetadata, Metadata, ProtocolType, SessionMetadata};
+    use crate::core::metadata::{DataMetadata, Metadata, ProtocolType, SessionMetadata, current_timestamp_minutes};
 
     fn test_key() -> [u8; KEY_LEN] {
         let pw = crate::core::crypto::hashed_password("testuser", "testpass");
@@ -262,7 +264,7 @@ mod tests {
     fn sample_data_meta(payload_len: u16) -> Metadata {
         Metadata::Data(DataMetadata {
             protocol_type: ProtocolType::DataClientToServer,
-            timestamp: 28_000_000,
+            timestamp: current_timestamp_minutes(),
             session_id: 0xDEAD_BEEF,
             sequence: 1,
             unack_seq: 0,
@@ -277,7 +279,7 @@ mod tests {
     fn sample_session_meta(payload_len: u16) -> Metadata {
         Metadata::Session(SessionMetadata {
             protocol_type: ProtocolType::OpenSessionRequest,
-            timestamp: 28_000_000,
+            timestamp: current_timestamp_minutes(),
             session_id: 0xCAFE_BABE,
             sequence: 0,
             status_code: 0,
@@ -349,6 +351,51 @@ mod tests {
 
         // Encoder and decoder nonce must be synchronized.
         assert_eq!(enc_nonce, dec_nonce);
+    }
+
+    #[test]
+    fn test_tcp_rejects_stale_timestamp() {
+        // A segment with a stale timestamp (e.g., 0 = unix epoch) should be
+        // rejected during decode_first_stream_segment when validation is on.
+        let uuid = "stale-ts-uuid";
+        let user_id: UserId = 100;
+        let registry =
+            super::super::registry::UserRegistry::from_list(vec![(user_id, uuid.to_string())]);
+
+        let hashed_pw = mieru_hashed_password(uuid);
+        let slots = time_slots_now();
+        let salt = crate::core::crypto::time_salt(slots[1]);
+        let client_key = derive_key(&hashed_pw, &salt);
+
+        let mut client_nonce = generate_random_nonce();
+        embed_user_hint(&mut client_nonce, uuid);
+
+        // Create a segment with timestamp = 0 (stale).
+        let stale_meta = Metadata::Session(SessionMetadata {
+            protocol_type: ProtocolType::OpenSessionRequest,
+            timestamp: 0, // stale!
+            session_id: 0xDEAD_0001,
+            sequence: 0,
+            status_code: 0,
+            payload_length: 0,
+            suffix_padding_length: 0,
+        });
+        let first_segment =
+            encode_test_segment(&client_key, &mut client_nonce, &stale_meta, &[], true);
+
+        // Registry should authenticate (key is correct), but the metadata
+        // timestamp validation should reject this segment.
+        let nonce_bytes: [u8; NONCE_SIZE] = first_segment[..NONCE_SIZE].try_into().unwrap();
+        let enc_meta_bytes = &first_segment[NONCE_SIZE..NONCE_SIZE + METADATA_LEN + TAG_SIZE];
+        let auth_result = registry.authenticate(&nonce_bytes, enc_meta_bytes);
+        assert!(auth_result.is_some(), "auth should still succeed (key is valid)");
+
+        // But full decode+validate should reject it.
+        let result = decode_test_first_segment(&client_key, &first_segment);
+        assert!(
+            result.is_none(),
+            "segment with stale timestamp should be rejected"
+        );
     }
 
     #[test]

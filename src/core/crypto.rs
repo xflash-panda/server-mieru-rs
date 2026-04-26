@@ -41,12 +41,13 @@ pub fn hashed_password(username: &str, password: &str) -> [u8; 32] {
     h.finalize().into()
 }
 
-/// Compute SHA-256(unix_minutes_as_big_endian_u64).
+/// Compute SHA-256(unix_seconds_as_big_endian_u64).
 ///
 /// Matches mieru Go `saltFromTime` which encodes the unix timestamp as 8
-/// big-endian bytes and hashes them.
-pub fn time_salt(unix_minutes: u64) -> [u8; 32] {
-    let bytes = unix_minutes.to_be_bytes();
+/// big-endian bytes and hashes them. The input is a unix timestamp in
+/// **seconds** (rounded to `KEY_REFRESH_INTERVAL` boundaries by the caller).
+pub fn time_salt(unix_seconds: u64) -> [u8; 32] {
+    let bytes = unix_seconds.to_be_bytes();
     let mut h = Sha256::new();
     h.update(bytes);
     h.finalize().into()
@@ -251,6 +252,28 @@ mod tests {
         let slots = time_slots_now();
         assert_eq!(slots[1] - slots[0], KEY_REFRESH_INTERVAL);
         assert_eq!(slots[2] - slots[1], KEY_REFRESH_INTERVAL);
+    }
+
+    #[test]
+    fn test_time_salt_receives_seconds_not_minutes() {
+        // time_slots_now() returns seconds rounded to 120s boundaries.
+        // time_salt() must accept these second-based values correctly.
+        // This test verifies the contract: time_salt takes unix SECONDS.
+        let slots = time_slots_now();
+        // Slots should be in the range of unix seconds (~1.7 billion in 2024+),
+        // NOT unix minutes (~28 million). If the parameter were truly minutes,
+        // slots would need to be divided by 60 before passing.
+        for &slot in &slots {
+            assert!(
+                slot > 1_000_000_000,
+                "slot {slot} looks like minutes, not seconds"
+            );
+        }
+        // Verify time_salt works with these second-based values and produces
+        // deterministic output.
+        let salt1 = time_salt(slots[1]);
+        let salt2 = time_salt(slots[1]);
+        assert_eq!(salt1, salt2);
     }
 
     #[test]
