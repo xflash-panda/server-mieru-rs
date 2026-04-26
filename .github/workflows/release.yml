@@ -31,7 +31,7 @@ jobs:
             os: ubuntu-latest
 
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v6
 
       - name: Configure git for private deps
         run: git config --global url."https://x-access-token:${{ secrets.GIT_DEPS_TOKEN }}@github.com/".insteadOf "https://github.com/"
@@ -57,7 +57,7 @@ jobs:
           cd ../../..
 
       - name: Upload artifact
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: ${{ env.BINARY_NAME }}-${{ matrix.target }}
           path: ${{ env.BINARY_NAME }}-${{ matrix.target }}.tar.gz
@@ -67,16 +67,16 @@ jobs:
     needs: build
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v6
 
       - name: Download all artifacts
-        uses: actions/download-artifact@v4
+        uses: actions/download-artifact@v8
         with:
           path: artifacts
           merge-multiple: true
 
       - name: Create release
-        uses: softprops/action-gh-release@v2
+        uses: softprops/action-gh-release@v3
         with:
           generate_release_notes: true
           files: artifacts/*.tar.gz
