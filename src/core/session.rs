@@ -148,10 +148,10 @@ impl SessionManager {
                 None
             }
             ProtocolType::DataClientToServer => {
-                if let Some(entry) = self.sessions.get(&session_id) {
-                    if !payload.is_empty() {
-                        let _ = entry.data_tx.try_send(payload);
-                    }
+                if let Some(entry) = self.sessions.get(&session_id)
+                    && !payload.is_empty()
+                {
+                    let _ = entry.data_tx.try_send(payload);
                 }
                 None
             }

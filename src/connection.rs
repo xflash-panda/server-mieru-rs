@@ -28,12 +28,18 @@ impl Drop for ConnectionGuard {
     }
 }
 
-impl ConnectionManager {
-    pub fn new() -> Self {
+impl Default for ConnectionManager {
+    fn default() -> Self {
         Self {
             connections: Arc::new(DashMap::new()),
             next_id: Arc::new(std::sync::atomic::AtomicU64::new(1)),
         }
+    }
+}
+
+impl ConnectionManager {
+    pub fn new() -> Self {
+        Self::default()
     }
 
     /// Register a new connection. Returns a guard that auto-removes on drop.

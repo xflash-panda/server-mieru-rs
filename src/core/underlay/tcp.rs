@@ -82,9 +82,8 @@ impl TcpUnderlay {
         let payload = if pay_len > 0 {
             let after_prefix = &remaining[prefix_len..];
             let encrypted_payload = &after_prefix[..pay_len + TAG_SIZE];
-            let p = crate::core::crypto::decrypt(&key, &recv_nonce, encrypted_payload)
-                .ok_or(Error::DecryptionFailed)?;
-            p
+            crate::core::crypto::decrypt(&key, &recv_nonce, encrypted_payload)
+                .ok_or(Error::DecryptionFailed)?
         } else {
             vec![]
         };
@@ -139,9 +138,8 @@ impl TcpUnderlay {
         let payload = if pay_len > 0 {
             let after_prefix = &remaining[prefix_len..];
             let encrypted_payload = &after_prefix[..pay_len + TAG_SIZE];
-            let p = crate::core::crypto::decrypt(&self.key, &self.recv_nonce, encrypted_payload)
-                .ok_or(Error::DecryptionFailed)?;
-            p
+            crate::core::crypto::decrypt(&self.key, &self.recv_nonce, encrypted_payload)
+                .ok_or(Error::DecryptionFailed)?
         } else {
             vec![]
         };
