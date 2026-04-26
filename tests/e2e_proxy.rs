@@ -7,7 +7,10 @@
 
 use std::time::Duration;
 
-use chacha20poly1305::{XChaCha20Poly1305, XNonce, aead::{Aead, KeyInit}};
+use chacha20poly1305::{
+    XChaCha20Poly1305, XNonce,
+    aead::{Aead, KeyInit},
+};
 use hmac::Hmac;
 use pbkdf2::pbkdf2;
 use rand::RngCore;
@@ -46,8 +49,7 @@ fn time_salt(unix_seconds: u64) -> [u8; 32] {
 
 fn derive_key(hashed_pw: &[u8; 32], salt: &[u8; 32]) -> [u8; KEY_LEN] {
     let mut key = [0u8; KEY_LEN];
-    pbkdf2::<Hmac<Sha256>>(hashed_pw, salt, KEY_ITER, &mut key)
-        .expect("PBKDF2 should not fail");
+    pbkdf2::<Hmac<Sha256>>(hashed_pw, salt, KEY_ITER, &mut key).expect("PBKDF2 should not fail");
     key
 }
 
@@ -189,7 +191,10 @@ async fn read_first_server_segment(
 ) {
     // Read nonce + encrypted metadata
     let mut header = vec![0u8; NONCE_SIZE + METADATA_LEN + TAG_SIZE];
-    stream.read_exact(&mut header).await.expect("read server first header");
+    stream
+        .read_exact(&mut header)
+        .await
+        .expect("read server first header");
 
     let mut server_nonce: [u8; NONCE_SIZE] = header[..NONCE_SIZE].try_into().unwrap();
     let enc_meta = &header[NONCE_SIZE..];
@@ -198,7 +203,8 @@ async fn read_first_server_segment(
     increment_nonce(&mut server_nonce);
 
     let protocol_type = meta_plain[0];
-    let session_id = u32::from_be_bytes([meta_plain[6], meta_plain[7], meta_plain[8], meta_plain[9]]);
+    let session_id =
+        u32::from_be_bytes([meta_plain[6], meta_plain[7], meta_plain[8], meta_plain[9]]);
 
     // Determine payload and padding sizes based on protocol type
     let (prefix_len, payload_len, suffix_len) = if protocol_type <= 5 {
@@ -217,7 +223,10 @@ async fn read_first_server_segment(
     let remaining_len = prefix_len + payload_len + TAG_SIZE + suffix_len;
     let mut remaining = vec![0u8; remaining_len];
     if remaining_len > 0 {
-        stream.read_exact(&mut remaining).await.expect("read server first remaining");
+        stream
+            .read_exact(&mut remaining)
+            .await
+            .expect("read server first remaining");
     }
 
     let payload = if payload_len > 0 {
@@ -314,26 +323,21 @@ async fn start_echo_server() -> (TcpListener, u16) {
 }
 
 async fn run_echo_server(listener: TcpListener) {
-    loop {
-        match listener.accept().await {
-            Ok((mut stream, _)) => {
-                tokio::spawn(async move {
-                    let mut buf = vec![0u8; 4096];
-                    loop {
-                        match stream.read(&mut buf).await {
-                            Ok(0) => break,
-                            Ok(n) => {
-                                if stream.write_all(&buf[..n]).await.is_err() {
-                                    break;
-                                }
-                            }
-                            Err(_) => break,
+    while let Ok((mut stream, _)) = listener.accept().await {
+        tokio::spawn(async move {
+            let mut buf = vec![0u8; 4096];
+            loop {
+                match stream.read(&mut buf).await {
+                    Ok(0) => break,
+                    Ok(n) => {
+                        if stream.write_all(&buf[..n]).await.is_err() {
+                            break;
                         }
                     }
-                });
+                    Err(_) => break,
+                }
             }
-            Err(_) => break,
-        }
+        });
     }
 }
 
@@ -374,27 +378,29 @@ async fn test_e2e_tcp_proxy_echo() {
     // 4. Connect to mieru server
     let server_addr = mieru_server_addr();
     println!("Connecting to mieru server at {server_addr}");
-    let mut stream = tokio::time::timeout(
-        Duration::from_secs(5),
-        TcpStream::connect(&server_addr),
-    )
-    .await
-    .expect("connect timeout")
-    .expect("connect failed");
+    let mut stream = tokio::time::timeout(Duration::from_secs(5), TcpStream::connect(&server_addr))
+        .await
+        .expect("connect timeout")
+        .expect("connect failed");
     println!("Connected!");
 
     // 5. Send OpenSessionRequest with SOCKS5 address pointing to echo server
     let session_id: u32 = 0x0000_0001;
     let socks_addr = encode_socks5_ipv4([127, 0, 0, 1], echo_port);
     let first_segment = encode_open_session(&key, &mut client_nonce, session_id, &socks_addr);
-    stream.write_all(&first_segment).await.expect("write first segment");
+    stream
+        .write_all(&first_segment)
+        .await
+        .expect("write first segment");
     println!("Sent OpenSessionRequest (session_id={session_id}, target=127.0.0.1:{echo_port})");
 
     // 6. Read server's first response (OpenSessionResponse)
-    let (mut server_nonce, proto_type, resp_session_id, _payload) =
-        tokio::time::timeout(Duration::from_secs(5), read_first_server_segment(&mut stream, &key))
-            .await
-            .expect("read first response timeout");
+    let (mut server_nonce, proto_type, resp_session_id, _payload) = tokio::time::timeout(
+        Duration::from_secs(5),
+        read_first_server_segment(&mut stream, &key),
+    )
+    .await
+    .expect("read first response timeout");
     println!("Got server response: proto_type={proto_type}, session_id={resp_session_id}");
     assert_eq!(proto_type, 3, "expected OpenSessionResponse (type=3)");
     assert_eq!(resp_session_id, session_id, "session ID mismatch");
@@ -403,7 +409,10 @@ async fn test_e2e_tcp_proxy_echo() {
     // 7. Send test data through the proxy
     let test_data = b"Hello from mieru e2e test!";
     let data_segment = encode_data_segment(&key, &mut client_nonce, session_id, 1, test_data);
-    stream.write_all(&data_segment).await.expect("write data segment");
+    stream
+        .write_all(&data_segment)
+        .await
+        .expect("write data segment");
     println!("Sent data: {:?}", String::from_utf8_lossy(test_data));
 
     // 8. Read echoed data back from server
@@ -426,7 +435,10 @@ async fn test_e2e_tcp_proxy_echo() {
     // 9. Send another round to verify continued operation
     let test_data2 = b"Second round of data through the mieru proxy!";
     let data_segment2 = encode_data_segment(&key, &mut client_nonce, session_id, 2, test_data2);
-    stream.write_all(&data_segment2).await.expect("write data segment 2");
+    stream
+        .write_all(&data_segment2)
+        .await
+        .expect("write data segment 2");
 
     let (proto_type2, _, echoed2) = tokio::time::timeout(
         Duration::from_secs(5),
@@ -455,13 +467,10 @@ async fn test_e2e_tcp_proxy_http() {
     embed_user_hint(&mut client_nonce, &uuid);
 
     let server_addr = mieru_server_addr();
-    let mut stream = tokio::time::timeout(
-        Duration::from_secs(5),
-        TcpStream::connect(&server_addr),
-    )
-    .await
-    .expect("connect timeout")
-    .expect("connect failed");
+    let mut stream = tokio::time::timeout(Duration::from_secs(5), TcpStream::connect(&server_addr))
+        .await
+        .expect("connect timeout")
+        .expect("connect failed");
 
     // Target: httpbin.org:80 (or use a known reachable host)
     let session_id: u32 = 0x0000_0002;
@@ -469,24 +478,32 @@ async fn test_e2e_tcp_proxy_http() {
     let http_request = b"GET /get HTTP/1.1\r\nHost: httpbin.org\r\nConnection: close\r\n\r\n";
 
     // Combine socks addr + HTTP request as the first session payload
-    let mut open_payload = socks_addr.clone();
+    let open_payload = socks_addr.clone();
     // The socks address is in the OpenSession payload, but the actual HTTP data
     // comes as a separate Data segment (based on how handle_session works).
     let first_segment = encode_open_session(&key, &mut client_nonce, session_id, &open_payload);
-    stream.write_all(&first_segment).await.expect("write first segment");
+    stream
+        .write_all(&first_segment)
+        .await
+        .expect("write first segment");
     println!("Sent OpenSessionRequest to httpbin.org:80");
 
     // Read OpenSessionResponse
-    let (mut server_nonce, proto_type, _, _) =
-        tokio::time::timeout(Duration::from_secs(5), read_first_server_segment(&mut stream, &key))
-            .await
-            .expect("timeout");
+    let (mut server_nonce, proto_type, _, _) = tokio::time::timeout(
+        Duration::from_secs(5),
+        read_first_server_segment(&mut stream, &key),
+    )
+    .await
+    .expect("timeout");
     assert_eq!(proto_type, 3, "expected OpenSessionResponse");
     println!("Session opened to httpbin.org:80");
 
     // Send HTTP request as data segment
     let data_segment = encode_data_segment(&key, &mut client_nonce, session_id, 1, http_request);
-    stream.write_all(&data_segment).await.expect("write HTTP request");
+    stream
+        .write_all(&data_segment)
+        .await
+        .expect("write HTTP request");
     println!("Sent HTTP GET /get");
 
     // Read HTTP response (may come in multiple segments)
@@ -525,7 +542,11 @@ async fn test_e2e_tcp_proxy_http() {
     }
 
     let response_str = String::from_utf8_lossy(&full_response);
-    println!("HTTP response ({} bytes):\n{}", full_response.len(), &response_str[..response_str.len().min(500)]);
+    println!(
+        "HTTP response ({} bytes):\n{}",
+        full_response.len(),
+        &response_str[..response_str.len().min(500)]
+    );
     assert!(
         response_str.contains("HTTP/1.1 200"),
         "expected HTTP 200 OK response"
@@ -598,11 +619,7 @@ fn encode_udp_data_segment(
     out
 }
 
-fn encode_udp_close_session(
-    key: &[u8; KEY_LEN],
-    username: &str,
-    session_id: u32,
-) -> Vec<u8> {
+fn encode_udp_close_session(key: &[u8; KEY_LEN], username: &str, session_id: u32) -> Vec<u8> {
     let mut nonce = [0u8; NONCE_SIZE];
     rand::rng().fill_bytes(&mut nonce);
     embed_user_hint(&mut nonce, username);
@@ -625,10 +642,7 @@ fn encode_udp_close_session(
 
 /// Decode a UDP response packet from the server.
 /// Returns (protocol_type, session_id, sequence, payload).
-fn decode_udp_response(
-    key: &[u8; KEY_LEN],
-    data: &[u8],
-) -> Option<(u8, u32, u32, Vec<u8>)> {
+fn decode_udp_response(key: &[u8; KEY_LEN], data: &[u8]) -> Option<(u8, u32, u32, Vec<u8>)> {
     if data.len() < NONCE_SIZE + METADATA_LEN + TAG_SIZE {
         return None;
     }
@@ -638,8 +652,14 @@ fn decode_udp_response(
     let meta_plain = decrypt(key, &nonce, enc_meta)?;
 
     let protocol_type = meta_plain[0];
-    let session_id = u32::from_be_bytes([meta_plain[6], meta_plain[7], meta_plain[8], meta_plain[9]]);
-    let sequence = u32::from_be_bytes([meta_plain[10], meta_plain[11], meta_plain[12], meta_plain[13]]);
+    let session_id =
+        u32::from_be_bytes([meta_plain[6], meta_plain[7], meta_plain[8], meta_plain[9]]);
+    let sequence = u32::from_be_bytes([
+        meta_plain[10],
+        meta_plain[11],
+        meta_plain[12],
+        meta_plain[13],
+    ]);
 
     let (prefix_len, payload_len, suffix_len) = if protocol_type <= 5 {
         let payload_len = u16::from_be_bytes([meta_plain[15], meta_plain[16]]) as usize;
@@ -692,15 +712,23 @@ async fn test_e2e_udp_proxy_echo() {
     // 3. Bind a local UDP socket
     let client_socket = UdpSocket::bind("127.0.0.1:0").await.expect("bind UDP");
     let server_addr = mieru_server_addr();
-    client_socket.connect(&server_addr).await.expect("connect UDP");
+    client_socket
+        .connect(&server_addr)
+        .await
+        .expect("connect UDP");
     println!("[UDP] Client bound, targeting mieru server at {server_addr}");
 
     // 4. Send OpenSessionRequest with SOCKS5 address
     let session_id: u32 = 0x0000_0010;
     let socks_addr = encode_socks5_ipv4([127, 0, 0, 1], echo_port);
     let open_packet = encode_udp_open_session(&key, &uuid, session_id, &socks_addr);
-    client_socket.send(&open_packet).await.expect("send open session");
-    println!("[UDP] Sent OpenSessionRequest (session_id={session_id:#x}, target=127.0.0.1:{echo_port})");
+    client_socket
+        .send(&open_packet)
+        .await
+        .expect("send open session");
+    println!(
+        "[UDP] Sent OpenSessionRequest (session_id={session_id:#x}, target=127.0.0.1:{echo_port})"
+    );
 
     // 5. Read OpenSessionResponse
     let mut recv_buf = vec![0u8; 2048];
@@ -743,27 +771,28 @@ async fn test_e2e_udp_proxy_echo() {
     .await
     .expect("timeout waiting for echo data");
 
-    println!(
-        "[UDP] Got echo: {:?}",
-        String::from_utf8_lossy(&echoed)
-    );
+    println!("[UDP] Got echo: {:?}", String::from_utf8_lossy(&echoed));
     assert_eq!(echoed, test_data, "echoed data mismatch!");
     println!("[UDP] E2E UDP proxy echo test PASSED!");
 
     // 8. Second round
     let test_data2 = b"Second UDP round!";
     let data_packet2 = encode_udp_data_segment(&key, &uuid, session_id, 1, test_data2);
-    client_socket.send(&data_packet2).await.expect("send data 2");
+    client_socket
+        .send(&data_packet2)
+        .await
+        .expect("send data 2");
 
     let echoed2 = tokio::time::timeout(Duration::from_secs(5), async {
         loop {
             let len = client_socket.recv(&mut recv_buf).await.expect("recv UDP");
             if let Some((proto_type, sid, _seq, payload)) =
                 decode_udp_response(&key, &recv_buf[..len])
+                && proto_type == 7
+                && sid == session_id
+                && !payload.is_empty()
             {
-                if proto_type == 7 && sid == session_id && !payload.is_empty() {
-                    return payload;
-                }
+                return payload;
             }
         }
     })
@@ -813,10 +842,11 @@ async fn test_e2e_udp_proxy_stress() {
         let opened = tokio::time::timeout(Duration::from_secs(5), async {
             loop {
                 let len = client_socket.recv(&mut recv_buf).await.unwrap();
-                if let Some((pt, sid, _, _)) = decode_udp_response(&key, &recv_buf[..len]) {
-                    if pt == 3 && sid == session_id {
-                        return true;
-                    }
+                if let Some((pt, sid, _, _)) = decode_udp_response(&key, &recv_buf[..len])
+                    && pt == 3
+                    && sid == session_id
+                {
+                    return true;
                 }
             }
         })
@@ -833,14 +863,19 @@ async fn test_e2e_udp_proxy_stress() {
         for r in 0..rounds_per_session {
             // Vary payload: small, medium, large
             let payload_size = match r % 4 {
-                0 => 16,          // tiny
-                1 => 128,         // small
-                2 => 512,         // medium
-                3 => 1200,        // near MTU
+                0 => 16,   // tiny
+                1 => 128,  // small
+                2 => 512,  // medium
+                3 => 1200, // near MTU
                 _ => unreachable!(),
             };
             let test_data: Vec<u8> = (0..payload_size)
-                .map(|i| ((session_id as u8).wrapping_mul(7).wrapping_add(r as u8).wrapping_add(i as u8)))
+                .map(|i| {
+                    (session_id as u8)
+                        .wrapping_mul(7)
+                        .wrapping_add(r as u8)
+                        .wrapping_add(i as u8)
+                })
                 .collect();
 
             let pkt = encode_udp_data_segment(&key, &uuid, session_id, r, &test_data);
@@ -852,10 +887,11 @@ async fn test_e2e_udp_proxy_stress() {
                     let len = client_socket.recv(&mut recv_buf).await.unwrap();
                     if let Some((pt, sid, _seq, payload)) =
                         decode_udp_response(&key, &recv_buf[..len])
+                        && pt == 7
+                        && sid == session_id
+                        && !payload.is_empty()
                     {
-                        if pt == 7 && sid == session_id && !payload.is_empty() {
-                            return payload;
-                        }
+                        return payload;
                     }
                 }
             })
@@ -945,13 +981,11 @@ async fn test_e2e_tcp_proxy_stress() {
         rand::rng().fill_bytes(&mut client_nonce);
         embed_user_hint(&mut client_nonce, &uuid);
 
-        let mut stream = tokio::time::timeout(
-            Duration::from_secs(5),
-            TcpStream::connect(&server_addr),
-        )
-        .await
-        .expect("connect timeout")
-        .expect("connect failed");
+        let mut stream =
+            tokio::time::timeout(Duration::from_secs(5), TcpStream::connect(&server_addr))
+                .await
+                .expect("connect timeout")
+                .expect("connect failed");
 
         let session_id: u32 = 0xAA00_0000 + c;
         let socks_addr = encode_socks5_ipv4([127, 0, 0, 1], echo_port);
@@ -983,8 +1017,7 @@ async fn test_e2e_tcp_proxy_stress() {
                 })
                 .collect();
 
-            let seg =
-                encode_data_segment(&key, &mut client_nonce, session_id, r + 1, &test_data);
+            let seg = encode_data_segment(&key, &mut client_nonce, session_id, r + 1, &test_data);
             stream.write_all(&seg).await.unwrap();
 
             let result = tokio::time::timeout(Duration::from_secs(10), async {
@@ -1017,9 +1050,7 @@ async fn test_e2e_tcp_proxy_stress() {
                     }
                 }
                 Err(_) => {
-                    println!(
-                        "[TCP-STRESS] conn={c} round={r}: TIMEOUT ({payload_size} bytes)"
-                    );
+                    println!("[TCP-STRESS] conn={c} round={r}: TIMEOUT ({payload_size} bytes)");
                     conn_failed += 1;
                     break;
                 }
@@ -1045,25 +1076,17 @@ async fn test_e2e_tcp_proxy_stress() {
     let throughput_mb = total_bytes as f64 / 1_048_576.0 / elapsed.as_secs_f64();
 
     println!("\n[TCP-STRESS] ========== RESULTS ==========");
-    println!(
-        "[TCP-STRESS] {total_passed}/{total} passed, {total_failed} failed"
-    );
+    println!("[TCP-STRESS] {total_passed}/{total} passed, {total_failed} failed");
     println!(
         "[TCP-STRESS] {total_connections} connections x {rounds_per_conn} rounds = {total} total"
     );
-    println!(
-        "[TCP-STRESS] Payload sizes: {:?}",
-        payload_sizes
-    );
+    println!("[TCP-STRESS] Payload sizes: {:?}", payload_sizes);
     println!(
         "[TCP-STRESS] Total data: {:.2} MB in {:.2}s ({:.2} MB/s)",
         total_bytes as f64 / 1_048_576.0,
         elapsed.as_secs_f64(),
         throughput_mb,
     );
-    assert_eq!(
-        total_failed, 0,
-        "TCP is reliable — no failures allowed"
-    );
+    assert_eq!(total_failed, 0, "TCP is reliable — no failures allowed");
     println!("[TCP-STRESS] PERFECT — all {total} rounds passed!");
 }
