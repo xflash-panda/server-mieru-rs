@@ -12,7 +12,7 @@ use tokio_util::sync::CancellationToken;
 
 use crate::acl::{self, OutboundType};
 use crate::business::{self, StatsCollector, UserId};
-use crate::connection::ConnectionManager;
+use crate::connection::{ConnectionGuard, ConnectionManager};
 use crate::core::crypto::KEY_LEN;
 use crate::core::metadata::{
     DataMetadata, Metadata, ProtocolType, current_timestamp_minutes,
@@ -48,6 +48,8 @@ struct PeerSession {
     rtt: RttEstimator,
     congestion: CubicCongestion,
     ack_needed: bool,
+    /// Held for the session's lifetime; dropped on cleanup → removes from ConnectionManager.
+    _conn_guard: Option<ConnectionGuard>,
 }
 
 // ---------------------------------------------------------------------------
@@ -164,6 +166,7 @@ impl UdpRelay {
                 rtt: RttEstimator::new(),
                 congestion: CubicCongestion::new(),
                 ack_needed: false,
+                _conn_guard: None,
             });
         peer.last_rx = Instant::now();
         peer.addr = peer_addr;
@@ -193,7 +196,8 @@ impl UdpRelay {
                 }
             }
             ProtocolType::OpenSessionRequest => {
-                let _guard = conn_mgr.register(user_id);
+                let guard = conn_mgr.register(user_id);
+                peer._conn_guard = Some(guard);
                 stats.record_request(user_id);
                 if let Some(stream) = self.session_manager.dispatch(&metadata, payload) {
                     tracing::debug!(session_id = stream.session_id(), user_id, "New UDP session opened");
@@ -230,36 +234,41 @@ impl UdpRelay {
                     }
 
                     let now = Instant::now();
+                    let inflight = peer.send_buf.inflight();
                     let seq = peer.send_buf.enqueue(seg.payload.clone(), now);
 
-                    // Build metadata with proper seq/unack_seq.
-                    let unack = peer.recv_buf.next_expected_seq();
-                    let meta = Metadata::Data(DataMetadata {
-                        protocol_type: ProtocolType::DataServerToClient,
-                        timestamp: current_timestamp_minutes(),
-                        session_id,
-                        sequence: seq,
-                        unack_seq: unack,
-                        window_size: 256,
-                        fragment_number: 0,
-                        prefix_padding_length: seg.prefix_padding.len() as u8,
-                        payload_length: seg.payload.len() as u16,
-                        suffix_padding_length: seg.suffix_padding.len() as u8,
-                    });
+                    // Only send immediately if congestion window allows.
+                    // Otherwise the data stays in send_buf and will be sent
+                    // by process_retransmissions once the window opens.
+                    if peer.congestion.can_send(inflight) {
+                        let unack = peer.recv_buf.next_expected_seq();
+                        let meta = Metadata::Data(DataMetadata {
+                            protocol_type: ProtocolType::DataServerToClient,
+                            timestamp: current_timestamp_minutes(),
+                            session_id,
+                            sequence: seq,
+                            unack_seq: unack,
+                            window_size: peer.congestion.window() as u16,
+                            fragment_number: 0,
+                            prefix_padding_length: seg.prefix_padding.len() as u8,
+                            payload_length: seg.payload.len() as u16,
+                            suffix_padding_length: seg.suffix_padding.len() as u8,
+                        });
 
-                    let packet = encode_response_packet_with_padding(
-                        &peer.key,
-                        &meta,
-                        &seg.payload,
-                        &seg.prefix_padding,
-                        &seg.suffix_padding,
-                    );
+                        let packet = encode_response_packet_with_padding(
+                            &peer.key,
+                            &meta,
+                            &seg.payload,
+                            &seg.prefix_padding,
+                            &seg.suffix_padding,
+                        );
 
-                    if let Err(e) = self.socket.send_to(&packet, peer.addr).await {
-                        tracing::warn!(error = %e, session_id, "Failed to send UDP data");
+                        if let Err(e) = self.socket.send_to(&packet, peer.addr).await {
+                            tracing::warn!(error = %e, session_id, "Failed to send UDP data");
+                        }
+
+                        peer.ack_needed = false; // piggybacked ACK
                     }
-
-                    peer.ack_needed = false; // piggybacked ACK
                 }
             }
             _ => {
@@ -298,7 +307,7 @@ impl UdpRelay {
                         session_id,
                         sequence: seq,
                         unack_seq: unack,
-                        window_size: 256,
+                        window_size: peer.congestion.window() as u16,
                         fragment_number: 0,
                         prefix_padding_length: prefix_pad.len() as u8,
                         payload_length: payload.len() as u16,
@@ -341,7 +350,7 @@ impl UdpRelay {
                 session_id,
                 sequence: 0,
                 unack_seq: unack,
-                window_size: 256,
+                window_size: peer.congestion.window() as u16,
                 fragment_number: 0,
                 prefix_padding_length: 0,
                 payload_length: 0,
@@ -459,6 +468,7 @@ mod tests {
             rtt: RttEstimator::new(),
             congestion: CubicCongestion::new(),
             ack_needed: false,
+            _conn_guard: None,
         }
     }
 
