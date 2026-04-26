@@ -30,20 +30,30 @@ fn parse_duration(s: &str) -> Result<Duration, String> {
     })
 }
 
-const DEFAULT_DATA_DIR: &str = "/var/lib/mieru-node";
+const DEFAULT_DATA_DIR: &str = "/var/lib/mieru-agent-node";
 
 #[derive(Parser, Debug, Clone)]
-#[command(author, version, about = "Mieru Server with Remote Panel Integration")]
+#[command(
+    author,
+    version,
+    about = "Mieru Server Agent with gRPC Panel Integration"
+)]
 #[command(rename_all = "snake_case")]
 pub struct CliArgs {
-    #[arg(long, env = "X_PANDA_MIERU_API")]
-    pub api: String,
+    #[arg(long, env = "X_PANDA_MIERU_SERVER_HOST", default_value = "127.0.0.1")]
+    pub server_host: String,
 
-    #[arg(long, env = "X_PANDA_MIERU_TOKEN")]
-    pub token: String,
+    #[arg(long, env = "X_PANDA_MIERU_PORT", default_value_t = 8082)]
+    pub port: u16,
 
     #[arg(long, env = "X_PANDA_MIERU_NODE")]
-    pub node: i64,
+    pub node: u32,
+
+    #[arg(long, env = "X_PANDA_MIERU_SERVER_NAME")]
+    pub server_name: Option<String>,
+
+    #[arg(long, env = "X_PANDA_MIERU_CA_FILE")]
+    pub ca_file: Option<String>,
 
     #[arg(long, env = "X_PANDA_MIERU_FETCH_USERS_INTERVAL", default_value = "60s", value_parser = parse_duration)]
     pub fetch_users_interval: Duration,
@@ -54,7 +64,7 @@ pub struct CliArgs {
     #[arg(long, env = "X_PANDA_MIERU_HEARTBEAT_INTERVAL", default_value = "180s", value_parser = parse_duration)]
     pub heartbeat_interval: Duration,
 
-    #[arg(long, env = "X_PANDA_MIERU_API_TIMEOUT", default_value = "30s", value_parser = parse_duration)]
+    #[arg(long, env = "X_PANDA_MIERU_API_TIMEOUT", default_value = "15s", value_parser = parse_duration)]
     pub api_timeout: Duration,
 
     #[arg(long, env = "X_PANDA_MIERU_LOG_MODE", default_value = "error")]
@@ -109,13 +119,10 @@ impl CliArgs {
     }
 
     pub fn validate(&self) -> Result<()> {
-        if self.api.is_empty() {
-            return Err(anyhow!("API endpoint URL is required"));
+        if self.server_host.is_empty() {
+            return Err(anyhow!("Server host is required"));
         }
-        if self.token.is_empty() {
-            return Err(anyhow!("API token is required"));
-        }
-        if self.node <= 0 {
+        if self.node == 0 {
             return Err(anyhow!("Node ID must be a positive integer"));
         }
         if self.fetch_users_interval.is_zero() {
@@ -221,13 +228,15 @@ mod tests {
 
     fn create_test_cli_args() -> CliArgs {
         CliArgs {
-            api: "https://api.example.com".to_string(),
-            token: "test-token".to_string(),
+            server_host: "127.0.0.1".to_string(),
+            port: 8082,
             node: 1,
+            server_name: None,
+            ca_file: None,
             fetch_users_interval: Duration::from_secs(60),
             report_traffics_interval: Duration::from_secs(80),
             heartbeat_interval: Duration::from_secs(180),
-            api_timeout: Duration::from_secs(30),
+            api_timeout: Duration::from_secs(15),
             log_mode: "error".to_string(),
             data_dir: PathBuf::from(DEFAULT_DATA_DIR),
             acl_conf_file: None,
@@ -246,9 +255,9 @@ mod tests {
     }
 
     #[test]
-    fn test_cli_args_validate_empty_api() {
+    fn test_cli_args_validate_empty_server_host() {
         let mut cli = create_test_cli_args();
-        cli.api = "".to_string();
+        cli.server_host = "".to_string();
         assert!(cli.validate().is_err());
     }
 
@@ -256,8 +265,6 @@ mod tests {
     fn test_cli_args_validate_invalid_node() {
         let mut cli = create_test_cli_args();
         cli.node = 0;
-        assert!(cli.validate().is_err());
-        cli.node = -1;
         assert!(cli.validate().is_err());
     }
 
