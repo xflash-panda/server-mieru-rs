@@ -38,11 +38,7 @@ impl RttEstimator {
             self.has_measurement = true;
         } else {
             // RTTVAR = 3/4 * RTTVAR + 1/4 * |SRTT - R'|
-            let diff = if self.srtt > rtt {
-                self.srtt - rtt
-            } else {
-                rtt - self.srtt
-            };
+            let diff = self.srtt.abs_diff(rtt);
             self.rttvar = self.rttvar * 3 / 4 + diff / 4;
             // SRTT = 7/8 * SRTT + 1/8 * R'
             self.srtt = self.srtt * 7 / 8 + rtt / 8;
