@@ -122,6 +122,9 @@ impl CliArgs {
         if self.server_host.is_empty() {
             return Err(anyhow!("Server host is required"));
         }
+        if self.port == 0 {
+            return Err(anyhow!("Port must be a positive integer"));
+        }
         if self.node == 0 {
             return Err(anyhow!("Node ID must be a positive integer"));
         }
