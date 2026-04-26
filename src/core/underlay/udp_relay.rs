@@ -420,7 +420,7 @@ pub async fn handle_session(
         None => return,
     };
 
-    let (target, consumed) = match outbound::parse_socks_address(&first_data) {
+    let (command, target, consumed) = match outbound::parse_socks5_request(&first_data) {
         Ok(r) => r,
         Err(e) => {
             tracing::debug!(error = %e, "Failed to parse target address");
@@ -428,25 +428,49 @@ pub async fn handle_session(
         }
     };
 
+    if command != outbound::SOCKS5_CONNECT {
+        tracing::debug!(command, "Unsupported SOCKS5 command");
+        let _ = session
+            .write_all(&outbound::socks5_response(0x07))
+            .await;
+        return;
+    }
+
     tracing::debug!(target = %target, user_id, "Session opened");
 
     let route = router.route(&target).await;
+    tracing::debug!(target = %target, route = match &route {
+        OutboundType::Direct { .. } => "direct",
+        OutboundType::Proxy(_) => "proxy",
+        OutboundType::Reject => "reject",
+    }, "Routing decision");
     match route {
         OutboundType::Direct { resolved } => {
+            tracing::trace!(target = %target, "Connecting to target");
             match outbound::connect_target(&target, resolved, CONNECT_TIMEOUT).await {
                 Ok(mut remote) => {
-                    let remaining = &first_data[consumed..];
-                    if !remaining.is_empty()
-                        && let Err(e) = remote.write_all(remaining).await
-                    {
-                        tracing::debug!(error = %e, "Failed to send initial data");
+                    tracing::trace!(target = %target, "Connected, sending SOCKS5 response");
+                    // Send SOCKS5 success response.
+                    if let Err(e) = session.write_all(&outbound::socks5_response(0x00)).await {
+                        tracing::debug!(error = %e, "Failed to send SOCKS5 response");
                         return;
                     }
+                    tracing::trace!(target = %target, "SOCKS5 response sent, forwarding initial data");
+                    let remaining = &first_data[consumed..];
+                    if !remaining.is_empty() {
+                        tracing::trace!(target = %target, remaining_len = remaining.len(), "Forwarding early data");
+                        if let Err(e) = remote.write_all(remaining).await {
+                            tracing::debug!(error = %e, "Failed to send initial data");
+                            return;
+                        }
+                    }
+                    tracing::trace!(target = %target, "Starting relay");
                     crate::relay::relay_with_idle_timeout(session, remote, relay_idle_timeout)
                         .await;
                 }
                 Err(e) => {
                     tracing::debug!(target = %target, error = %e, "Failed to connect");
+                    let _ = session.write_all(&outbound::socks5_response(0x05)).await;
                 }
             }
         }
@@ -458,6 +482,11 @@ pub async fn handle_session(
                 tokio::time::timeout(CONNECT_TIMEOUT, handler.dial_tcp(&mut acl_addr)).await;
             match connect_result {
                 Ok(Ok(mut remote)) => {
+                    // Send SOCKS5 success response.
+                    if let Err(e) = session.write_all(&outbound::socks5_response(0x00)).await {
+                        tracing::debug!(error = %e, "Failed to send SOCKS5 response");
+                        return;
+                    }
                     let remaining = &first_data[consumed..];
                     if !remaining.is_empty()
                         && let Err(e) = remote.write_all(remaining).await
@@ -465,20 +494,23 @@ pub async fn handle_session(
                         tracing::debug!(error = %e, "Failed to send initial data via proxy");
                         return;
                     }
-                    tracing::debug!(target = %target, "Relaying via proxy");
+                    tracing::trace!(target = %target, "Relaying via proxy");
                     crate::relay::relay_with_idle_timeout(session, remote, relay_idle_timeout)
                         .await;
                 }
                 Ok(Err(e)) => {
                     tracing::debug!(target = %target, error = %e, "Proxy connect failed");
+                    let _ = session.write_all(&outbound::socks5_response(0x05)).await;
                 }
                 Err(_) => {
                     tracing::debug!(target = %target, "Proxy connect timeout");
+                    let _ = session.write_all(&outbound::socks5_response(0x05)).await;
                 }
             }
         }
         OutboundType::Reject => {
             tracing::debug!(target = %target, "Connection rejected by ACL");
+            let _ = session.write_all(&outbound::socks5_response(0x02)).await;
         }
     }
 }
