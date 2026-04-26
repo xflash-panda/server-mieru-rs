@@ -11,5 +11,6 @@ pub mod error;
 pub mod logger;
 pub mod net;
 pub mod outbound;
+pub mod relay;
 
 pub use error::{Error, Result};

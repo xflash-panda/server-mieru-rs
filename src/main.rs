@@ -97,6 +97,7 @@ async fn main() -> Result<()> {
         Arc::new(MieruStatsCollector(Arc::clone(&stats_collector)));
     let connection_manager = ConnectionManager::new();
     let semaphore = Arc::new(Semaphore::new(cli.max_connections));
+    let relay_idle_timeout = cli.relay_idle_timeout;
 
     let task_config = TaskConfig::new(
         cli.fetch_users_interval,
@@ -166,6 +167,7 @@ async fn main() -> Result<()> {
                                             &router,
                                             &conn_mgr,
                                             cancel,
+                                            relay_idle_timeout,
                                         ).await {
                                             log::debug!(peer = %peer, error = %e, "TCP connection ended");
                                         }
@@ -196,7 +198,7 @@ async fn main() -> Result<()> {
             tokio::spawn(async move {
                 let registry = Arc::new(UserRegistry::from_user_manager(&user_mgr));
                 let relay = core::underlay::udp_relay::UdpRelay::new(socket);
-                relay.run(registry, stats, router, conn_mgr, cancel).await;
+                relay.run(registry, stats, router, conn_mgr, cancel, relay_idle_timeout).await;
             });
         }
     }
@@ -263,6 +265,7 @@ async fn handle_tcp_connection(
     router: &Arc<dyn acl::OutboundRouter>,
     conn_mgr: &ConnectionManager,
     cancel: CancellationToken,
+    relay_idle_timeout: Duration,
 ) -> Result<()> {
     let registry = UserRegistry::from_user_manager(user_manager);
 
@@ -279,7 +282,7 @@ async fn handle_tcp_connection(
         let router = Arc::clone(router);
         let stats = Arc::clone(stats);
         tokio::spawn(async move {
-            handle_session(session_stream, &*router, user_id, &*stats).await;
+            handle_session(session_stream, &*router, user_id, &*stats, relay_idle_timeout).await;
         });
     }
 
@@ -296,7 +299,7 @@ async fn handle_tcp_connection(
                             let router = Arc::clone(router);
                             let stats = Arc::clone(stats);
                             tokio::spawn(async move {
-                                handle_session(session_stream, &*router, user_id, &*stats).await;
+                                handle_session(session_stream, &*router, user_id, &*stats, relay_idle_timeout).await;
                             });
                         }
                     }

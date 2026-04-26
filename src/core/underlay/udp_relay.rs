@@ -81,6 +81,7 @@ impl UdpRelay {
         router: Arc<dyn acl::OutboundRouter>,
         conn_mgr: ConnectionManager,
         cancel: CancellationToken,
+        relay_idle_timeout: Duration,
     ) {
         let mut buf = vec![0u8; UDP_BUF_SIZE];
         let mut output_tick = tokio::time::interval(OUTPUT_INTERVAL);
@@ -100,6 +101,7 @@ impl UdpRelay {
                                 &stats,
                                 &router,
                                 &conn_mgr,
+                                relay_idle_timeout,
                             ).await;
                         }
                         Err(e) => {
@@ -134,6 +136,7 @@ impl UdpRelay {
         stats: &Arc<dyn StatsCollector>,
         router: &Arc<dyn acl::OutboundRouter>,
         conn_mgr: &ConnectionManager,
+        relay_idle_timeout: Duration,
     ) {
         let (user_id, key, _nonce, metadata, payload) = match authenticate_packet(packet, registry)
         {
@@ -205,7 +208,7 @@ impl UdpRelay {
                     let router = Arc::clone(router);
                     let stats = Arc::clone(stats);
                     tokio::spawn(async move {
-                        handle_session(stream, &*router, user_id, &*stats).await;
+                        handle_session(stream, &*router, user_id, &*stats, relay_idle_timeout).await;
                     });
                 }
             }
@@ -399,6 +402,7 @@ pub async fn handle_session(
     router: &dyn acl::OutboundRouter,
     user_id: business::UserId,
     _stats: &dyn StatsCollector,
+    relay_idle_timeout: Duration,
 ) {
     use tokio::io::AsyncWriteExt;
 
@@ -429,7 +433,12 @@ pub async fn handle_session(
                         tracing::debug!(error = %e, "Failed to send initial data");
                         return;
                     }
-                    let _ = tokio::io::copy_bidirectional(&mut session, &mut remote).await;
+                    crate::relay::relay_with_idle_timeout(
+                        session,
+                        remote,
+                        relay_idle_timeout,
+                    )
+                    .await;
                 }
                 Err(e) => {
                     tracing::debug!(target = %target, error = %e, "Failed to connect");
