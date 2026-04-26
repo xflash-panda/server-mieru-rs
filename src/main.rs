@@ -124,13 +124,36 @@ async fn main() -> Result<()> {
 
     let cancel_token = CancellationToken::new();
 
+    // Shared registry for TCP listeners, refreshed every 2 minutes.
+    let tcp_registry: Arc<tokio::sync::RwLock<Arc<UserRegistry>>> = Arc::new(
+        tokio::sync::RwLock::new(Arc::new(UserRegistry::from_user_manager(&user_manager))),
+    );
+    {
+        let user_mgr = Arc::clone(&user_manager);
+        let registry = Arc::clone(&tcp_registry);
+        let cancel = cancel_token.clone();
+        tokio::spawn(async move {
+            let mut tick = tokio::time::interval(Duration::from_secs(120));
+            tick.tick().await; // skip first immediate tick
+            loop {
+                tokio::select! {
+                    _ = tick.tick() => {
+                        let new = Arc::new(UserRegistry::from_user_manager(&user_mgr));
+                        *registry.write().await = new;
+                    }
+                    _ = cancel.cancelled() => break,
+                }
+            }
+        });
+    }
+
     for &port in &listen_config.ports {
         if listen_config.tcp_enabled {
             let listener = net::bind_tcp_dual_stack(port)?;
             let addr = listener.local_addr()?;
             log::info!(addr = %addr, "TCP listening");
 
-            let user_mgr = Arc::clone(&user_manager);
+            let tcp_registry = Arc::clone(&tcp_registry);
             let stats = Arc::clone(&mieru_stats);
             let router = Arc::clone(&router);
             let sem = Arc::clone(&semaphore);
@@ -154,7 +177,7 @@ async fn main() -> Result<()> {
                                     let _ = stream.set_nodelay(true);
                                     net::set_tcp_keepalive(&stream);
 
-                                    let user_mgr = Arc::clone(&user_mgr);
+                                    let registry = Arc::clone(&*tcp_registry.read().await);
                                     let stats = Arc::clone(&stats);
                                     let router = Arc::clone(&router);
                                     let conn_mgr = conn_mgr.clone();
@@ -164,7 +187,7 @@ async fn main() -> Result<()> {
                                         let _permit = permit;
                                         if let Err(e) = handle_tcp_connection(
                                             &mut stream,
-                                            &user_mgr,
+                                            &registry,
                                             &stats,
                                             &router,
                                             &conn_mgr,
@@ -270,17 +293,15 @@ async fn main() -> Result<()> {
 
 async fn handle_tcp_connection(
     stream: &mut tokio::net::TcpStream,
-    user_manager: &MieruUserManager,
+    registry: &UserRegistry,
     stats: &Arc<dyn StatsCollector>,
     router: &Arc<dyn acl::OutboundRouter>,
     conn_mgr: &ConnectionManager,
     cancel: CancellationToken,
     relay_idle_timeout: Duration,
 ) -> Result<()> {
-    let registry = UserRegistry::from_user_manager(user_manager);
-
     let (mut underlay, first_meta, first_payload) =
-        TcpUnderlay::authenticate(stream, &registry).await?;
+        TcpUnderlay::authenticate(stream, registry).await?;
 
     let user_id = underlay.user_id;
     let guard = conn_mgr.register(user_id);
@@ -320,12 +341,21 @@ async fn handle_tcp_connection(
                             });
                         }
                     }
-                    Err(_) => break,
+                    Err(e) => {
+                        log::debug!(error = %e, "read_segment failed, closing underlay");
+                        break;
+                    }
                 }
             }
             seg = outbound_rx.recv() => {
                 match seg {
                     Some(seg) => {
+                        log::debug!(
+                            protocol = ?seg.metadata.protocol_type(),
+                            session_id = seg.metadata.session_id(),
+                            payload_len = seg.payload.len(),
+                            "writing outbound segment to TCP"
+                        );
                         if let Err(e) = underlay.write_segment(stream, &seg.metadata, &seg.payload, &seg.prefix_padding, &seg.suffix_padding).await {
                             log::debug!(error = %e, "Write segment failed");
                             break;
