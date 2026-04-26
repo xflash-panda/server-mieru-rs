@@ -14,9 +14,7 @@ use crate::acl::{self, OutboundType};
 use crate::business::{self, StatsCollector, UserId};
 use crate::connection::{ConnectionGuard, ConnectionManager};
 use crate::core::crypto::KEY_LEN;
-use crate::core::metadata::{
-    DataMetadata, Metadata, ProtocolType, current_timestamp_minutes,
-};
+use crate::core::metadata::{DataMetadata, Metadata, ProtocolType, current_timestamp_minutes};
 use crate::core::padding;
 use crate::core::session::{OutboundSegment, SessionManager, SessionStream};
 use crate::core::underlay::congestion::CubicCongestion;
@@ -137,11 +135,11 @@ impl UdpRelay {
         router: &Arc<dyn acl::OutboundRouter>,
         conn_mgr: &ConnectionManager,
     ) {
-        let (user_id, key, _nonce, metadata, payload) =
-            match authenticate_packet(packet, registry) {
-                Some(r) => r,
-                None => return,
-            };
+        let (user_id, key, _nonce, metadata, payload) = match authenticate_packet(packet, registry)
+        {
+            Some(r) => r,
+            None => return,
+        };
 
         let session_id = metadata.session_id();
         let protocol = metadata.protocol_type();
@@ -172,13 +170,13 @@ impl UdpRelay {
         peer.addr = peer_addr;
 
         // Handle ACK from client (unack_seq in DataMetadata).
-        if let Metadata::Data(ref dm) = metadata {
-            if dm.unack_seq > 0 {
-                let now = Instant::now();
-                if let Some(rtt_sample) = peer.send_buf.ack(dm.unack_seq, now) {
-                    peer.rtt.update(rtt_sample);
-                    peer.congestion.on_ack(now);
-                }
+        if let Metadata::Data(ref dm) = metadata
+            && dm.unack_seq > 0
+        {
+            let now = Instant::now();
+            if let Some(rtt_sample) = peer.send_buf.ack(dm.unack_seq, now) {
+                peer.rtt.update(rtt_sample);
+                peer.congestion.on_ack(now);
             }
         }
 
@@ -190,8 +188,7 @@ impl UdpRelay {
                     }
                     let ready = peer.recv_buf.drain_ready();
                     for data in ready {
-                        self.session_manager
-                            .dispatch(&metadata, data);
+                        self.session_manager.dispatch(&metadata, data);
                     }
                 }
             }
@@ -200,7 +197,11 @@ impl UdpRelay {
                 peer._conn_guard = Some(guard);
                 stats.record_request(user_id);
                 if let Some(stream) = self.session_manager.dispatch(&metadata, payload) {
-                    tracing::debug!(session_id = stream.session_id(), user_id, "New UDP session opened");
+                    tracing::debug!(
+                        session_id = stream.session_id(),
+                        user_id,
+                        "New UDP session opened"
+                    );
                     let router = Arc::clone(router);
                     let stats = Arc::clone(stats);
                     tokio::spawn(async move {
@@ -357,13 +358,8 @@ impl UdpRelay {
                 suffix_padding_length: suffix_pad.len() as u8,
             });
 
-            let packet = encode_response_packet_with_padding(
-                &peer.key,
-                &meta,
-                &[],
-                &[],
-                &suffix_pad,
-            );
+            let packet =
+                encode_response_packet_with_padding(&peer.key, &meta, &[], &[], &suffix_pad);
 
             if let Err(e) = socket.send_to(&packet, peer.addr).await {
                 tracing::warn!(error = %e, session_id, "Failed to send ACK");
@@ -427,11 +423,11 @@ pub async fn handle_session(
             match outbound::connect_target(&target, resolved, CONNECT_TIMEOUT).await {
                 Ok(mut remote) => {
                     let remaining = &first_data[consumed..];
-                    if !remaining.is_empty() {
-                        if let Err(e) = remote.write_all(remaining).await {
-                            tracing::debug!(error = %e, "Failed to send initial data");
-                            return;
-                        }
+                    if !remaining.is_empty()
+                        && let Err(e) = remote.write_all(remaining).await
+                    {
+                        tracing::debug!(error = %e, "Failed to send initial data");
+                        return;
                     }
                     let _ = tokio::io::copy_bidirectional(&mut session, &mut remote).await;
                 }

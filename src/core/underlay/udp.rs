@@ -51,7 +51,14 @@ pub fn encode_response_packet_with_padding(
     suffix_padding: &[u8],
 ) -> Vec<u8> {
     let nonce = generate_random_nonce();
-    encode_packet_segment(key, &nonce, metadata, payload, prefix_padding, suffix_padding)
+    encode_packet_segment(
+        key,
+        &nonce,
+        metadata,
+        payload,
+        prefix_padding,
+        suffix_padding,
+    )
 }
 
 /// Encode a response UDP packet with a specific nonce (useful for testing).
@@ -201,7 +208,8 @@ mod tests {
             suffix_padding_length: suffix_pad.len() as u8,
         });
 
-        let encoded = encode_response_packet_with_padding(&key, &meta, payload, &prefix_pad, &suffix_pad);
+        let encoded =
+            encode_response_packet_with_padding(&key, &meta, payload, &prefix_pad, &suffix_pad);
 
         // Should be decodable
         let (_, dec_meta, dec_payload) =

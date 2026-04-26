@@ -38,18 +38,14 @@ impl SendBuf {
     /// Remove all segments with seq < ack_seq.
     /// Return RTT sample from the last removed segment if it had retransmit_count == 0 (Karn's algorithm).
     pub fn ack(&mut self, ack_seq: u32, now: Instant) -> Option<Duration> {
-        let seqs_to_remove: Vec<u32> = self
-            .buf
-            .range(..ack_seq)
-            .map(|(&seq, _)| seq)
-            .collect();
+        let seqs_to_remove: Vec<u32> = self.buf.range(..ack_seq).map(|(&seq, _)| seq).collect();
 
         let mut rtt_sample: Option<Duration> = None;
         for seq in seqs_to_remove {
-            if let Some(seg) = self.buf.remove(&seq) {
-                if seg.retransmit_count == 0 {
-                    rtt_sample = Some(now.duration_since(seg.sent_at));
-                }
+            if let Some(seg) = self.buf.remove(&seq)
+                && seg.retransmit_count == 0
+            {
+                rtt_sample = Some(now.duration_since(seg.sent_at));
             }
         }
         rtt_sample
