@@ -450,11 +450,35 @@ pub async fn handle_session(
                 }
             }
         }
+        OutboundType::Proxy(handler) => {
+            use acl_engine_rs::outbound::Addr;
+
+            let mut acl_addr = Addr::new(target.host_string(), target.port());
+            let connect_result =
+                tokio::time::timeout(CONNECT_TIMEOUT, handler.dial_tcp(&mut acl_addr)).await;
+            match connect_result {
+                Ok(Ok(mut remote)) => {
+                    let remaining = &first_data[consumed..];
+                    if !remaining.is_empty()
+                        && let Err(e) = remote.write_all(remaining).await
+                    {
+                        tracing::debug!(error = %e, "Failed to send initial data via proxy");
+                        return;
+                    }
+                    tracing::debug!(target = %target, "Relaying via proxy");
+                    crate::relay::relay_with_idle_timeout(session, remote, relay_idle_timeout)
+                        .await;
+                }
+                Ok(Err(e)) => {
+                    tracing::debug!(target = %target, error = %e, "Proxy connect failed");
+                }
+                Err(_) => {
+                    tracing::debug!(target = %target, "Proxy connect timeout");
+                }
+            }
+        }
         OutboundType::Reject => {
             tracing::debug!(target = %target, "Connection rejected by ACL");
-        }
-        _ => {
-            tracing::debug!(target = %target, "Proxy outbound");
         }
     }
 }
