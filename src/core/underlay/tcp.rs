@@ -437,8 +437,7 @@ mod tests {
         let mut client_send_nonce = test_nonce();
 
         // Client sends OpenSessionRequest with SOCKS5 request payload
-        let socks5_request =
-            vec![0x05, 0x01, 0x00, 0x01, 127, 0, 0, 1, 0x00, 0x50]; // CONNECT 127.0.0.1:80
+        let socks5_request = vec![0x05, 0x01, 0x00, 0x01, 127, 0, 0, 1, 0x00, 0x50]; // CONNECT 127.0.0.1:80
         let open_meta = Metadata::Session(SessionMetadata {
             protocol_type: ProtocolType::OpenSessionRequest,
             timestamp: current_timestamp_minutes(),
@@ -482,8 +481,7 @@ mod tests {
             payload_length: 0,
             suffix_padding_length: 0,
         });
-        let resp_seg =
-            encode_test_segment(&key, &mut server_send_nonce, &open_resp, &[], true);
+        let resp_seg = encode_test_segment(&key, &mut server_send_nonce, &open_resp, &[], true);
 
         // Client decodes first server segment
         let (client_recv_nonce, decoded_resp, decoded_resp_payload) =
@@ -522,9 +520,8 @@ mod tests {
         );
 
         // Client decodes SOCKS5 response
-        let (_, decoded_socks_resp) =
-            decode_test_segment(&key, &mut client_recv_nonce, &data_seg)
-                .expect("SOCKS5 response decode failed — nonce desync!");
+        let (_, decoded_socks_resp) = decode_test_segment(&key, &mut client_recv_nonce, &data_seg)
+            .expect("SOCKS5 response decode failed — nonce desync!");
         assert_eq!(decoded_socks_resp, socks5_response);
         assert_eq!(
             server_send_nonce, client_recv_nonce,
@@ -548,9 +545,8 @@ mod tests {
         let http_seg =
             encode_test_segment(&key, &mut server_send_nonce, &http_meta, http_data, false);
 
-        let (_, decoded_http) =
-            decode_test_segment(&key, &mut client_recv_nonce, &http_seg)
-                .expect("HTTP data decode failed — nonce desync propagated!");
+        let (_, decoded_http) = decode_test_segment(&key, &mut client_recv_nonce, &http_seg)
+            .expect("HTTP data decode failed — nonce desync propagated!");
         assert_eq!(decoded_http, http_data);
         assert_eq!(
             server_send_nonce, client_recv_nonce,

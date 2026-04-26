@@ -222,7 +222,11 @@ async fn read_first_server_segment(
 
     // Go mieru: when payload is empty, NO encrypted payload block is written (no tag).
     // Nonce only advances for payload when payload is non-empty.
-    let payload_block_len = if payload_len > 0 { payload_len + TAG_SIZE } else { 0 };
+    let payload_block_len = if payload_len > 0 {
+        payload_len + TAG_SIZE
+    } else {
+        0
+    };
     let remaining_len = prefix_len + payload_block_len + suffix_len;
     let mut remaining = vec![0u8; remaining_len];
     if remaining_len > 0 {
@@ -276,7 +280,11 @@ async fn read_server_segment(
     };
 
     // Go mieru: when payload is empty, NO encrypted payload block is written.
-    let payload_block_len = if payload_len > 0 { payload_len + TAG_SIZE } else { 0 };
+    let payload_block_len = if payload_len > 0 {
+        payload_len + TAG_SIZE
+    } else {
+        0
+    };
     let remaining_len = prefix_len + payload_block_len + suffix_len;
     let mut remaining = vec![0u8; remaining_len];
     if remaining_len > 0 {
@@ -429,7 +437,10 @@ async fn test_e2e_tcp_proxy_echo() {
     )
     .await
     .expect("read SOCKS5 response timeout");
-    assert_eq!(socks_proto_type, 7, "expected DataServerToClient for SOCKS5 response");
+    assert_eq!(
+        socks_proto_type, 7,
+        "expected DataServerToClient for SOCKS5 response"
+    );
     assert!(socks_payload.len() >= 4, "SOCKS5 response too short");
     assert_eq!(socks_payload[0], 0x05, "SOCKS5 version");
     assert_eq!(socks_payload[1], 0x00, "SOCKS5 success reply");
@@ -713,7 +724,11 @@ fn decode_udp_response(key: &[u8; KEY_LEN], data: &[u8]) -> Option<(u8, u32, u32
 
     let rest = &data[NONCE_SIZE + METADATA_LEN + TAG_SIZE..];
     // Go mieru: when payload is empty, no encrypted payload block exists
-    let payload_block_len = if payload_len > 0 { payload_len + TAG_SIZE } else { 0 };
+    let payload_block_len = if payload_len > 0 {
+        payload_len + TAG_SIZE
+    } else {
+        0
+    };
     let expected = prefix_len + payload_block_len + suffix_len;
     if rest.len() < expected {
         return None;

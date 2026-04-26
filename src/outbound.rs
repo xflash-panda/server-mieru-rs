@@ -290,7 +290,7 @@ mod tests {
         // Client sends: CONNECT to example.com:443
         let mut request = vec![0x05, 0x01, 0x00]; // version, CONNECT, reserved
         request.push(0x03); // domain
-        request.push(11);   // "example.com".len()
+        request.push(11); // "example.com".len()
         request.extend_from_slice(b"example.com");
         request.extend_from_slice(&443u16.to_be_bytes());
 

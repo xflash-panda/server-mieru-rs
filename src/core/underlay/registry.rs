@@ -5,9 +5,7 @@
 //! to attempt XChaCha20-Poly1305 decryptions against cached keys.
 
 use crate::business::{MieruUserManager, UserId, mieru_hashed_password};
-use crate::core::crypto::{
-    KEY_LEN, NONCE_SIZE, TAG_SIZE, decrypt, derive_key, time_slots_now,
-};
+use crate::core::crypto::{KEY_LEN, NONCE_SIZE, TAG_SIZE, decrypt, derive_key, time_slots_now};
 use crate::core::metadata::METADATA_LEN;
 
 /// A pre-computed (user_id, derived_key) pair ready for decryption attempts.
@@ -229,10 +227,7 @@ mod tests {
 
     #[test]
     fn test_key_count() {
-        let registry = UserRegistry::from_list(vec![
-            (1, "a".to_string()),
-            (2, "b".to_string()),
-        ]);
+        let registry = UserRegistry::from_list(vec![(1, "a".to_string()), (2, "b".to_string())]);
         assert_eq!(registry.key_count(), 6); // 2 users × 3 time slots
     }
 }

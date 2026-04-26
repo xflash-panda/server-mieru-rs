@@ -714,7 +714,10 @@ mod tests {
         assert!(decoded_payload.is_empty());
         assert_eq!(decoded_meta.session_id(), meta.session_id());
         // Nonces must be synchronized
-        assert_eq!(enc_nonce, dec_nonce, "nonce desync after empty payload segment");
+        assert_eq!(
+            enc_nonce, dec_nonce,
+            "nonce desync after empty payload segment"
+        );
     }
 
     #[test]
@@ -750,10 +753,7 @@ mod tests {
         let (dec_meta2, dec_payload2) =
             decode_stream_segment(&key, &mut dec_nonce, &seg2).expect("seg2 decode failed");
         assert!(dec_payload2.is_empty());
-        assert_eq!(
-            dec_meta2.protocol_type(),
-            ProtocolType::OpenSessionResponse
-        );
+        assert_eq!(dec_meta2.protocol_type(), ProtocolType::OpenSessionResponse);
         assert_eq!(enc_nonce, dec_nonce, "nonce desync after empty segment 2");
 
         // Segment 3: data with payload (SOCKS5 response or actual data)
@@ -801,10 +801,7 @@ mod tests {
                 decode_stream_segment(&key, &mut dec_nonce, &seg).expect("decode failed");
             }
 
-            assert_eq!(
-                enc_nonce, dec_nonce,
-                "nonce desync after empty segment {i}"
-            );
+            assert_eq!(enc_nonce, dec_nonce, "nonce desync after empty segment {i}");
         }
     }
 
