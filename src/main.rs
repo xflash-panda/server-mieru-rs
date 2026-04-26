@@ -152,6 +152,7 @@ async fn main() -> Result<()> {
                         result = listener.accept() => {
                             match result {
                                 Ok((mut stream, peer)) => {
+                                    log::debug!(peer = %peer, "new connection");
                                     let permit = match sem.clone().try_acquire_owned() {
                                         Ok(p) => p,
                                         Err(_) => {
