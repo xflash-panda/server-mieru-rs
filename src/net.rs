@@ -48,6 +48,20 @@ fn new_tcp_socket(domain: Domain) -> Result<Socket> {
     Ok(socket)
 }
 
+/// Enable TCP keepalive on a connection.
+/// TCP_KEEPIDLE=30s (when to start probes), TCP_KEEPINTVL=10s (probe interval).
+/// Without this, dead connections (peer crashed/disconnected) hang until the
+/// relay idle timeout fires. With keepalive, detection takes ~120s (30 + 10*9).
+pub fn set_tcp_keepalive(stream: &tokio::net::TcpStream) {
+    let sock = socket2::SockRef::from(stream);
+    let _ = sock.set_keepalive(true);
+    let _ = sock.set_tcp_keepalive(
+        &socket2::TcpKeepalive::new()
+            .with_time(std::time::Duration::from_secs(30))
+            .with_interval(std::time::Duration::from_secs(10)),
+    );
+}
+
 // ── UDP ──────────────────────────────────────────────────────────────────────
 
 /// Bind a UDP socket on the given port with IPv4+IPv6 dual-stack support.
@@ -174,5 +188,44 @@ mod tests {
         let (len, _src) = server.recv_from(&mut buf).await.expect("recv failed");
 
         assert_eq!(&buf[..len], msg);
+    }
+
+    #[tokio::test]
+    async fn test_tcp_keepalive_enabled() {
+        let listener = bind_tcp_dual_stack(0).expect("bind failed");
+        let port = listener.local_addr().unwrap().port();
+
+        let connect = TcpStream::connect(SocketAddr::new(Ipv4Addr::LOCALHOST.into(), port));
+        let accept = listener.accept();
+        let (_, accept_result) = tokio::join!(connect, accept);
+        let (accepted, _) = accept_result.expect("accept failed");
+
+        set_tcp_keepalive(&accepted);
+
+        let sock = socket2::SockRef::from(&accepted);
+        assert!(sock.keepalive().unwrap(), "SO_KEEPALIVE should be enabled");
+    }
+
+    #[tokio::test]
+    async fn test_tcp_keepalive_interval() {
+        let listener = bind_tcp_dual_stack(0).expect("bind failed");
+        let port = listener.local_addr().unwrap().port();
+
+        let connect = TcpStream::connect(SocketAddr::new(Ipv4Addr::LOCALHOST.into(), port));
+        let accept = listener.accept();
+        let (_, accept_result) = tokio::join!(connect, accept);
+        let (accepted, _) = accept_result.expect("accept failed");
+
+        set_tcp_keepalive(&accepted);
+
+        let sock = socket2::SockRef::from(&accepted);
+        let interval = sock
+            .tcp_keepalive_interval()
+            .expect("keepalive_interval should be readable");
+        assert!(
+            interval <= std::time::Duration::from_secs(30),
+            "TCP keepalive interval should be <= 30s, got {:?}",
+            interval
+        );
     }
 }

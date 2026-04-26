@@ -86,6 +86,7 @@ async fn connect_target_inner(
             match TcpStream::connect(addr).await {
                 Ok(stream) => {
                     let _ = stream.set_nodelay(true);
+                    crate::net::set_tcp_keepalive(&stream);
                     return Ok(stream);
                 }
                 Err(e) => last_err = Some(e),
@@ -107,6 +108,7 @@ async fn connect_target_inner(
         Address::Domain(host, port) => TcpStream::connect((host.as_str(), *port)).await?,
     };
     let _ = stream.set_nodelay(true);
+    crate::net::set_tcp_keepalive(&stream);
     Ok(stream)
 }
 

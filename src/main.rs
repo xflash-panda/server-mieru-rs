@@ -151,6 +151,7 @@ async fn main() -> Result<()> {
                                         }
                                     };
                                     let _ = stream.set_nodelay(true);
+                                    net::set_tcp_keepalive(&stream);
 
                                     let user_mgr = Arc::clone(&user_mgr);
                                     let stats = Arc::clone(&stats);
