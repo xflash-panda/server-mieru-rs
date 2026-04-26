@@ -85,7 +85,10 @@ mod tests {
         let initial = cc.cwnd;
         let now = Instant::now();
         cc.on_ack(now);
-        assert!(cc.cwnd > initial, "cwnd should grow after ACK in slow start");
+        assert!(
+            cc.cwnd > initial,
+            "cwnd should grow after ACK in slow start"
+        );
     }
 
     #[test]
@@ -100,7 +103,10 @@ mod tests {
     fn test_on_loss_sets_ssthresh() {
         let mut cc = CubicCongestion::new();
         cc.on_loss();
-        assert!(cc.ssthresh.is_finite(), "ssthresh should be finite after loss");
+        assert!(
+            cc.ssthresh.is_finite(),
+            "ssthresh should be finite after loss"
+        );
     }
 
     #[test]
