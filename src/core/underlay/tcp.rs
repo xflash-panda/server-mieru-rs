@@ -30,6 +30,19 @@ pub struct TcpUnderlay {
     first_send: bool,
 }
 
+/// Read half of a TCP underlay — owns the receive nonce.
+pub struct TcpUnderlayReader {
+    key: [u8; KEY_LEN],
+    recv_nonce: [u8; NONCE_SIZE],
+}
+
+/// Write half of a TCP underlay — owns the send nonce.
+pub struct TcpUnderlayWriter {
+    key: [u8; KEY_LEN],
+    send_nonce: [u8; NONCE_SIZE],
+    first_send: bool,
+}
+
 impl TcpUnderlay {
     /// Authenticate an incoming TCP connection by reading the first segment.
     ///
@@ -108,16 +121,45 @@ impl TcpUnderlay {
         ))
     }
 
-    /// Read one segment from the TCP stream.
+    /// Split into independent reader and writer halves.
     ///
-    /// Returns the metadata and payload on success.
-    pub async fn read_segment(&mut self, stream: &mut TcpStream) -> Result<(Metadata, Vec<u8>)> {
-        // Read encrypted metadata block.
+    /// This enables running read and write loops as independent concurrent
+    /// tasks, preventing deadlock when `dispatch().await` blocks the read
+    /// path from draining the outbound channel.
+    pub fn split(self) -> (TcpUnderlayReader, TcpUnderlayWriter) {
+        (
+            TcpUnderlayReader {
+                key: self.key,
+                recv_nonce: self.recv_nonce,
+            },
+            TcpUnderlayWriter {
+                key: self.key,
+                send_nonce: self.send_nonce,
+                first_send: self.first_send,
+            },
+        )
+    }
+
+    /// Get the encryption key (for testing or session management).
+    pub fn key(&self) -> &[u8; KEY_LEN] {
+        &self.key
+    }
+}
+
+// ---------------------------------------------------------------------------
+// TcpUnderlayReader
+// ---------------------------------------------------------------------------
+
+impl TcpUnderlayReader {
+    /// Read one segment from the stream.
+    pub async fn read_segment<R: tokio::io::AsyncRead + Unpin>(
+        &mut self,
+        stream: &mut R,
+    ) -> Result<(Metadata, Vec<u8>)> {
         let meta_len = METADATA_LEN + TAG_SIZE;
         let mut enc_meta = vec![0u8; meta_len];
         stream.read_exact(&mut enc_meta).await?;
 
-        // Decrypt metadata.
         let meta_plain = crate::core::crypto::decrypt(&self.key, &self.recv_nonce, &enc_meta)
             .ok_or(Error::DecryptionFailed)?;
         let meta_arr: [u8; METADATA_LEN] = meta_plain
@@ -127,8 +169,6 @@ impl TcpUnderlay {
             Metadata::decode(&meta_arr).ok_or(Error::InvalidSegment("invalid metadata".into()))?;
         increment_nonce(&mut self.recv_nonce);
 
-        // Read remaining: prefix_padding + [encrypted_payload + tag] + suffix_padding.
-        // When payload is empty, there is no encrypted payload block.
         let (prefix_len, suffix_len) = padding_lengths(&metadata);
         let pay_len = payload_length(&metadata);
 
@@ -139,7 +179,6 @@ impl TcpUnderlay {
             stream.read_exact(&mut remaining).await?;
         }
 
-        // Decrypt payload (only if non-empty; nonce only advances when payload exists).
         let payload = if pay_len > 0 {
             let after_prefix = &remaining[prefix_len..];
             let encrypted_payload = &after_prefix[..pay_len + TAG_SIZE];
@@ -153,13 +192,19 @@ impl TcpUnderlay {
 
         Ok((metadata, payload))
     }
+}
 
-    /// Write one segment to the TCP stream.
+// ---------------------------------------------------------------------------
+// TcpUnderlayWriter
+// ---------------------------------------------------------------------------
+
+impl TcpUnderlayWriter {
+    /// Write one segment to the stream.
     ///
     /// The first call includes the nonce prefix; subsequent calls do not.
-    pub async fn write_segment(
+    pub async fn write_segment<W: tokio::io::AsyncWrite + Unpin>(
         &mut self,
-        stream: &mut TcpStream,
+        stream: &mut W,
         metadata: &Metadata,
         payload: &[u8],
         prefix_padding: &[u8],
@@ -178,11 +223,6 @@ impl TcpUnderlay {
         stream.write_all(&encoded).await?;
         self.first_send = false;
         Ok(())
-    }
-
-    /// Get the encryption key (for testing or session management).
-    pub fn key(&self) -> &[u8; KEY_LEN] {
-        &self.key
     }
 }
 

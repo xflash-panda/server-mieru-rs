@@ -87,7 +87,15 @@ impl SessionManager {
     /// - `AckClientToServer`: currently a no-op for TCP (flow control simplified).
     ///
     /// Returns `Some(SessionStream)` only for `OpenSessionRequest`.
-    pub fn dispatch(&mut self, metadata: &Metadata, payload: Vec<u8>) -> Option<SessionStream> {
+    ///
+    /// This method is async because it uses blocking sends to guarantee no data
+    /// is lost — matching Go mieru's behavior where the underlay loop blocks
+    /// when session buffers are full, providing natural backpressure.
+    pub async fn dispatch(
+        &mut self,
+        metadata: &Metadata,
+        payload: Vec<u8>,
+    ) -> Option<SessionStream> {
         let session_id = metadata.session_id();
         let protocol = metadata.protocol_type();
 
@@ -102,7 +110,7 @@ impl SessionManager {
                     return None;
                 }
 
-                let (data_tx, data_rx) = mpsc::channel(1024);
+                let (data_tx, data_rx) = mpsc::channel(4096);
                 let cancel = CancellationToken::new();
 
                 self.sessions.insert(
@@ -114,11 +122,19 @@ impl SessionManager {
                 );
 
                 // Send the open-session payload (if any) to the data channel.
-                if !payload.is_empty() {
-                    let _ = data_tx.try_send(payload);
+                // Blocking send guarantees initial payload is never lost.
+                if !payload.is_empty()
+                    && let Err(e) = data_tx.send(payload).await
+                {
+                    tracing::warn!(
+                        session_id,
+                        "failed to deliver initial payload: {}",
+                        e
+                    );
                 }
 
                 // Send OpenSessionResponse back to the client.
+                // Blocking send guarantees control messages are never dropped.
                 let suffix_pad = padding::session_padding(0);
                 let response_meta = Metadata::Session(SessionMetadata {
                     protocol_type: ProtocolType::OpenSessionResponse,
@@ -129,15 +145,15 @@ impl SessionManager {
                     payload_length: 0,
                     suffix_padding_length: suffix_pad.len() as u8,
                 });
-                if let Err(e) = self.outbound_tx.try_send(OutboundSegment {
+                if let Err(e) = self.outbound_tx.send(OutboundSegment {
                     metadata: response_meta,
                     payload: vec![],
                     suffix_padding: suffix_pad,
                     prefix_padding: vec![],
-                }) {
+                }).await {
                     tracing::warn!(
                         session_id,
-                        "outbound channel full, OpenSessionResponse dropped: {}",
+                        "outbound channel closed, OpenSessionResponse not sent: {}",
                         e
                     );
                 }
@@ -156,17 +172,17 @@ impl SessionManager {
                 })
             }
             ProtocolType::CloseSessionRequest | ProtocolType::CloseSessionResponse => {
-                self.close_session(session_id);
+                self.close_session(session_id).await;
                 None
             }
             ProtocolType::DataClientToServer => {
                 if let Some(entry) = self.sessions.get(&session_id)
                     && !payload.is_empty()
-                    && let Err(e) = entry.data_tx.try_send(payload)
+                    && let Err(e) = entry.data_tx.send(payload).await
                 {
                     tracing::debug!(
                         session_id,
-                        "session data channel full, payload dropped: {}",
+                        "session closed, data not delivered: {}",
                         e
                     );
                 }
@@ -184,10 +200,10 @@ impl SessionManager {
     }
 
     /// Close a specific session by ID.
-    pub fn close_session(&mut self, session_id: u32) {
+    pub async fn close_session(&mut self, session_id: u32) {
         if let Some(entry) = self.sessions.remove(&session_id) {
             entry.cancel.cancel();
-            // Send close response.
+            // Send close response. Blocking send guarantees delivery.
             let suffix_pad = padding::session_padding(0);
             let close_meta = Metadata::Session(SessionMetadata {
                 protocol_type: ProtocolType::CloseSessionResponse,
@@ -198,15 +214,15 @@ impl SessionManager {
                 payload_length: 0,
                 suffix_padding_length: suffix_pad.len() as u8,
             });
-            if let Err(e) = self.outbound_tx.try_send(OutboundSegment {
+            if let Err(e) = self.outbound_tx.send(OutboundSegment {
                 metadata: close_meta,
                 payload: vec![],
                 suffix_padding: suffix_pad,
                 prefix_padding: vec![],
-            }) {
+            }).await {
                 tracing::warn!(
                     session_id,
-                    "outbound channel full, CloseSessionResponse dropped: {}",
+                    "outbound channel closed, CloseSessionResponse not sent: {}",
                     e
                 );
             }
@@ -214,10 +230,29 @@ impl SessionManager {
     }
 
     /// Close all sessions.
-    pub fn close_all(&mut self) {
+    pub async fn close_all(&mut self) {
         let ids: Vec<u32> = self.sessions.keys().copied().collect();
         for id in ids {
-            self.close_session(id);
+            self.close_session(id).await;
+        }
+    }
+
+    /// Non-blocking data dispatch for UDP.
+    ///
+    /// Uses `try_send` for data payloads to avoid blocking the UDP event loop
+    /// (which would deadlock since outbound writes share the same loop).
+    /// Control messages (open/close) still use blocking sends via `dispatch()`.
+    /// With 4096-element channel buffers, drops are extremely rare.
+    pub fn try_dispatch_data(&self, session_id: u32, payload: Vec<u8>) {
+        if let Some(entry) = self.sessions.get(&session_id)
+            && !payload.is_empty()
+            && let Err(e) = entry.data_tx.try_send(payload)
+        {
+            tracing::warn!(
+                session_id,
+                "UDP session data dropped (channel full): {}",
+                e
+            );
         }
     }
 
@@ -457,7 +492,7 @@ mod tests {
         let (mut mgr, mut outbound_rx) = SessionManager::new();
 
         let meta = open_session_meta(1);
-        let stream = mgr.dispatch(&meta, vec![]);
+        let stream = mgr.dispatch(&meta, vec![]).await;
         assert!(stream.is_some(), "open session should return a stream");
         assert_eq!(mgr.session_count(), 1);
 
@@ -476,13 +511,13 @@ mod tests {
 
         // Open session.
         let meta = open_session_meta(42);
-        let mut stream = mgr.dispatch(&meta, vec![]).unwrap();
+        let mut stream = mgr.dispatch(&meta, vec![]).await.unwrap();
         let _ = outbound_rx.try_recv(); // consume open response
 
         // Dispatch data to the session.
         let payload = b"hello session data".to_vec();
         let data = data_meta(42, payload.len() as u16);
-        let result = mgr.dispatch(&data, payload.clone());
+        let result = mgr.dispatch(&data, payload.clone()).await;
         assert!(result.is_none(), "data dispatch should not return stream");
 
         // The stream should receive the data.
@@ -497,14 +532,14 @@ mod tests {
 
         // Open session.
         let meta = open_session_meta(10);
-        let stream = mgr.dispatch(&meta, vec![]);
+        let stream = mgr.dispatch(&meta, vec![]).await;
         assert!(stream.is_some());
         let _ = outbound_rx.try_recv(); // consume open response
         assert_eq!(mgr.session_count(), 1);
 
         // Close session.
         let close = close_session_meta(10);
-        mgr.dispatch(&close, vec![]);
+        mgr.dispatch(&close, vec![]).await;
         assert_eq!(mgr.session_count(), 0);
 
         // Should have sent a CloseSessionResponse.
@@ -522,13 +557,13 @@ mod tests {
         // Open 3 sessions.
         for id in 1..=3u32 {
             let meta = open_session_meta(id);
-            let _ = mgr.dispatch(&meta, vec![]);
+            let _ = mgr.dispatch(&meta, vec![]).await;
             let _ = outbound_rx.try_recv();
         }
         assert_eq!(mgr.session_count(), 3);
 
         // Close all.
-        mgr.close_all();
+        mgr.close_all().await;
         assert_eq!(mgr.session_count(), 0);
     }
 
@@ -540,7 +575,7 @@ mod tests {
         let (mut mgr, mut outbound_rx) = SessionManager::new();
 
         let meta = open_session_meta(88);
-        let mut stream = mgr.dispatch(&meta, vec![]).unwrap();
+        let mut stream = mgr.dispatch(&meta, vec![]).await.unwrap();
         let _ = outbound_rx.try_recv(); // consume open response
 
         let payload = b"test payload for padding check".to_vec();
@@ -570,7 +605,7 @@ mod tests {
         let (mut mgr, mut outbound_rx) = SessionManager::new();
 
         let meta = open_session_meta(89);
-        let _stream = mgr.dispatch(&meta, vec![]);
+        let _stream = mgr.dispatch(&meta, vec![]).await;
 
         let seg = outbound_rx.try_recv().expect("expected open response");
         match &seg.metadata {
@@ -590,7 +625,7 @@ mod tests {
         let (mut mgr, mut outbound_rx) = SessionManager::new();
 
         let meta = open_session_meta(55);
-        let mut stream = mgr.dispatch(&meta, vec![]).unwrap();
+        let mut stream = mgr.dispatch(&meta, vec![]).await.unwrap();
         let _ = outbound_rx.try_recv(); // consume open response
 
         // Send data from session back to client.
@@ -615,7 +650,7 @@ mod tests {
 
         let meta = open_session_meta(7);
         let initial_payload = b"piggybacked data".to_vec();
-        let mut stream = mgr.dispatch(&meta, initial_payload.clone()).unwrap();
+        let mut stream = mgr.dispatch(&meta, initial_payload.clone()).await.unwrap();
         let _ = outbound_rx.try_recv(); // consume open response
 
         // The initial payload should be available via recv.
@@ -629,13 +664,13 @@ mod tests {
         let (mut mgr, mut outbound_rx) = SessionManager::new();
 
         let meta = open_session_meta(1);
-        let first = mgr.dispatch(&meta, vec![]);
+        let first = mgr.dispatch(&meta, vec![]).await;
         assert!(first.is_some());
         let _ = outbound_rx.try_recv();
 
         // Duplicate open should be rejected.
         let meta2 = open_session_meta(1);
-        let second = mgr.dispatch(&meta2, vec![]);
+        let second = mgr.dispatch(&meta2, vec![]).await;
         assert!(second.is_none(), "duplicate session should be rejected");
         assert_eq!(mgr.session_count(), 1);
     }
@@ -645,9 +680,135 @@ mod tests {
         let (mut mgr, _outbound_rx) = SessionManager::new();
 
         let meta = open_session_meta(0);
-        let result = mgr.dispatch(&meta, vec![]);
+        let result = mgr.dispatch(&meta, vec![]).await;
         assert!(result.is_none(), "session ID 0 should be rejected");
         assert_eq!(mgr.session_count(), 0);
+    }
+
+    // ---- Stream interruption / data loss tests (RED) ----
+
+    /// Verify that data is NOT lost when the session's data channel
+    /// is under backpressure (slow consumer).
+    ///
+    /// With async dispatch, the sender blocks until the channel has space,
+    /// so a concurrent consumer must drain to allow the producer to proceed.
+    #[tokio::test]
+    async fn test_dispatch_data_not_lost_under_backpressure() {
+        let (mut mgr, mut outbound_rx) = SessionManager::new();
+
+        // Open a session — channel capacity is 4096.
+        let meta = open_session_meta(99);
+        let mut stream = mgr.dispatch(&meta, vec![]).await.unwrap();
+        let _ = outbound_rx.try_recv(); // consume open response
+
+        let total_messages = 5000u32; // > 4096 channel capacity
+
+        // Spawn a concurrent consumer that slowly drains the data channel.
+        let consumer = tokio::spawn(async move {
+            let mut received = 0u32;
+            while let Some(_data) = stream.recv().await {
+                received += 1;
+                if received >= total_messages {
+                    break;
+                }
+            }
+            received
+        });
+
+        // Producer: dispatch all messages (will block when channel is full,
+        // resume when consumer drains).
+        for i in 0..total_messages {
+            let payload = format!("msg-{i}").into_bytes();
+            let data = data_meta(99, payload.len() as u16);
+            mgr.dispatch(&data, payload).await;
+        }
+
+        // Close the session to signal EOF to the consumer.
+        mgr.close_session(99).await;
+
+        let received = consumer.await.unwrap();
+        assert_eq!(
+            received, total_messages,
+            "expected {total_messages} messages but only received {received} — \
+             {} messages were lost",
+            total_messages - received
+        );
+    }
+
+    /// Verify that OpenSessionResponse control messages are never
+    /// dropped when the outbound channel is saturated with data segments.
+    ///
+    /// With async dispatch, the send blocks until the channel has space.
+    /// A concurrent drainer ensures it eventually makes room.
+    #[tokio::test]
+    async fn test_control_messages_not_dropped_under_data_pressure() {
+        let (mut mgr, mut outbound_rx) = SessionManager::new();
+
+        // Open some sessions and fill the outbound channel (capacity 2048)
+        // with data segments via the streams' outbound_tx.
+        let mut streams = Vec::new();
+        for id in 1..=20u32 {
+            let meta = open_session_meta(id);
+            if let Some(s) = mgr.dispatch(&meta, vec![]).await {
+                streams.push(s);
+            }
+        }
+        // Drain the open responses
+        while outbound_rx.try_recv().is_ok() {}
+
+        // Fill the outbound channel with data segments
+        let mut filled = 0;
+        'outer: for s in &streams {
+            for _ in 0..200 {
+                let seg = OutboundSegment {
+                    metadata: Metadata::Data(DataMetadata {
+                        protocol_type: ProtocolType::DataServerToClient,
+                        timestamp: crate::core::metadata::current_timestamp_minutes(),
+                        session_id: s.session_id(),
+                        sequence: 0,
+                        unack_seq: 0,
+                        window_size: 256,
+                        fragment_number: 0,
+                        prefix_padding_length: 0,
+                        payload_length: 100,
+                        suffix_padding_length: 0,
+                    }),
+                    payload: vec![0xAA; 100],
+                    prefix_padding: vec![],
+                    suffix_padding: vec![],
+                };
+                if s.outbound_tx.try_send(seg).is_err() {
+                    break 'outer;
+                }
+                filled += 1;
+            }
+        }
+        assert!(filled > 1000, "should have filled most of the outbound channel, filled {filled}");
+
+        // Spawn a drainer so the blocking send can eventually complete.
+        let drainer = tokio::spawn(async move {
+            let mut found = false;
+            while let Some(seg) = outbound_rx.recv().await {
+                if seg.metadata.session_id() == 999
+                    && seg.metadata.protocol_type() == ProtocolType::OpenSessionResponse
+                {
+                    found = true;
+                    break;
+                }
+            }
+            found
+        });
+
+        // Now open a NEW session — its OpenSessionResponse MUST be delivered.
+        let new_meta = open_session_meta(999);
+        let _new_stream = mgr.dispatch(&new_meta, vec![]).await;
+
+        let found = drainer.await.unwrap();
+        assert!(
+            found,
+            "OpenSessionResponse for session 999 was DROPPED — \
+             control messages must never be lost even when outbound channel is full"
+        );
     }
 
     // ---- Bug verification tests ----
@@ -660,7 +821,7 @@ mod tests {
         let n = 300u32;
         for id in 1..=n {
             let meta = open_session_meta(id);
-            let _ = mgr.dispatch(&meta, vec![]);
+            let _ = mgr.dispatch(&meta, vec![]).await;
         }
         let mut count = 0;
         while outbound_rx.try_recv().is_ok() {
@@ -680,7 +841,7 @@ mod tests {
 
         let (mut mgr, mut outbound_rx) = SessionManager::new();
         let meta = open_session_meta(1);
-        let mut stream = mgr.dispatch(&meta, vec![]).unwrap();
+        let mut stream = mgr.dispatch(&meta, vec![]).await.unwrap();
         let _ = outbound_rx.try_recv(); // consume open response
 
         let large_buf = vec![0xAB; 70_000]; // > u16::MAX (65535)

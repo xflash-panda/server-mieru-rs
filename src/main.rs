@@ -174,7 +174,7 @@ async fn main() -> Result<()> {
                     tokio::select! {
                         result = listener.accept() => {
                             match result {
-                                Ok((mut stream, peer)) => {
+                                Ok((stream, peer)) => {
                                     log::debug!(peer = %peer, "new connection");
                                     let permit = match sem.clone().try_acquire_owned() {
                                         Ok(p) => p,
@@ -195,7 +195,7 @@ async fn main() -> Result<()> {
                                     tokio::spawn(async move {
                                         let _permit = permit;
                                         if let Err(e) = handle_tcp_connection(
-                                            &mut stream,
+                                            stream,
                                             &registry,
                                             &stats,
                                             &router,
@@ -301,7 +301,7 @@ async fn main() -> Result<()> {
 }
 
 async fn handle_tcp_connection(
-    stream: &mut tokio::net::TcpStream,
+    mut stream: tokio::net::TcpStream,
     registry: &UserRegistry,
     stats: &Arc<dyn StatsCollector>,
     router: &Arc<dyn acl::OutboundRouter>,
@@ -309,16 +309,20 @@ async fn handle_tcp_connection(
     cancel: CancellationToken,
     relay_idle_timeout: Duration,
 ) -> Result<()> {
-    let (mut underlay, first_meta, first_payload) =
-        TcpUnderlay::authenticate(stream, registry).await?;
+    let (underlay, first_meta, first_payload) =
+        TcpUnderlay::authenticate(&mut stream, registry).await?;
 
     let user_id = underlay.user_id;
     let guard = conn_mgr.register(user_id);
     stats.record_request(user_id);
 
-    let (mut session_mgr, mut outbound_rx) = SessionManager::new();
+    let (mut reader, mut writer) = underlay.split();
+    let (mut session_mgr, outbound_rx) = SessionManager::new();
 
-    if let Some(session_stream) = session_mgr.dispatch(&first_meta, first_payload) {
+    // Split TCP stream so read and write can run independently.
+    let (mut read_half, mut write_half) = stream.into_split();
+
+    if let Some(session_stream) = session_mgr.dispatch(&first_meta, first_payload).await {
         let router = Arc::clone(router);
         let stats = Arc::clone(stats);
         tokio::spawn(async move {
@@ -333,16 +337,67 @@ async fn handle_tcp_connection(
         });
     }
 
+    // Independent write task: drains outbound_rx → TCP.
+    // This prevents deadlock: even when dispatch().await blocks the read
+    // loop, outbound segments continue flowing to the client, allowing
+    // sessions to drain their data channels and unblock dispatch.
+    let stats_w = Arc::clone(stats);
+    let cancel_w = cancel.clone();
+    let guard_cancel_w = guard.cancel.clone();
+    let write_done = CancellationToken::new();
+    let write_done_signal = write_done.clone();
+    let write_task = tokio::spawn(async move {
+        let mut outbound_rx = outbound_rx;
+        loop {
+            tokio::select! {
+                seg = outbound_rx.recv() => {
+                    match seg {
+                        Some(seg) => {
+                            log::debug!(
+                                protocol = ?seg.metadata.protocol_type(),
+                                session_id = seg.metadata.session_id(),
+                                payload_len = seg.payload.len(),
+                                "writing outbound segment to TCP"
+                            );
+                            let download_bytes = seg.payload.len() as u64;
+                            if let Err(e) = writer.write_segment(
+                                &mut write_half,
+                                &seg.metadata,
+                                &seg.payload,
+                                &seg.prefix_padding,
+                                &seg.suffix_padding,
+                            ).await {
+                                log::debug!(error = %e, "Write segment failed");
+                                break;
+                            }
+                            if download_bytes > 0 {
+                                stats_w.record_download(user_id, download_bytes);
+                            }
+                        }
+                        None => break,
+                    }
+                }
+                _ = guard_cancel_w.cancelled() => break,
+                _ = cancel_w.cancelled() => break,
+            }
+        }
+        write_done_signal.cancel();
+    });
+
+    // Read loop: reads from TCP → dispatches to sessions.
+    // dispatch().await may block when a session channel is full — this is
+    // correct TCP backpressure. The write task runs independently so
+    // outbound data keeps flowing even while dispatch blocks.
     loop {
         tokio::select! {
-            result = underlay.read_segment(stream) => {
+            result = reader.read_segment(&mut read_half) => {
                 match result {
                     Ok((metadata, payload)) => {
                         let upload_bytes = payload.len() as u64;
                         if upload_bytes > 0 {
                             stats.record_upload(user_id, upload_bytes);
                         }
-                        if let Some(session_stream) = session_mgr.dispatch(&metadata, payload) {
+                        if let Some(session_stream) = session_mgr.dispatch(&metadata, payload).await {
                             let router = Arc::clone(router);
                             let stats = Arc::clone(stats);
                             tokio::spawn(async move {
@@ -356,32 +411,17 @@ async fn handle_tcp_connection(
                     }
                 }
             }
-            seg = outbound_rx.recv() => {
-                match seg {
-                    Some(seg) => {
-                        log::debug!(
-                            protocol = ?seg.metadata.protocol_type(),
-                            session_id = seg.metadata.session_id(),
-                            payload_len = seg.payload.len(),
-                            "writing outbound segment to TCP"
-                        );
-                        if let Err(e) = underlay.write_segment(stream, &seg.metadata, &seg.payload, &seg.prefix_padding, &seg.suffix_padding).await {
-                            log::debug!(error = %e, "Write segment failed");
-                            break;
-                        }
-                        let download_bytes = seg.payload.len() as u64;
-                        if download_bytes > 0 {
-                            stats.record_download(user_id, download_bytes);
-                        }
-                    }
-                    None => break,
-                }
+            _ = write_done.cancelled() => {
+                log::debug!("write task exited, stopping read loop");
+                break;
             }
             _ = guard.cancel.cancelled() => break,
             _ = cancel.cancelled() => break,
         }
     }
 
-    session_mgr.close_all();
+    session_mgr.close_all().await;
+    drop(session_mgr); // drop outbound_tx → write task sees None → exits
+    let _ = tokio::time::timeout(Duration::from_secs(2), write_task).await;
     Ok(())
 }
