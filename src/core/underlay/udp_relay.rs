@@ -121,7 +121,7 @@ impl UdpRelay {
                     self.send_acks().await;
                 }
                 _ = cleanup_tick.tick() => {
-                    self.cleanup_idle_sessions();
+                    self.cleanup_idle_sessions().await;
                 }
                 _ = registry_tick.tick() => {
                     registry = Arc::new(UserRegistry::from_user_manager(&user_manager));
@@ -132,7 +132,7 @@ impl UdpRelay {
             }
         }
 
-        self.session_manager.close_all();
+        self.session_manager.close_all().await;
     }
 
     #[allow(clippy::too_many_arguments)]
@@ -199,7 +199,11 @@ impl UdpRelay {
                     }
                     let ready = peer.recv_buf.drain_ready();
                     for data in ready {
-                        self.session_manager.dispatch(&metadata, data);
+                        // Non-blocking: prevents deadlock in the UDP event
+                        // loop where blocking dispatch would prevent outbound
+                        // writes, causing session channels to fill up.
+                        self.session_manager
+                            .try_dispatch_data(session_id, data);
                     }
                 }
             }
@@ -207,7 +211,7 @@ impl UdpRelay {
                 let guard = conn_mgr.register(user_id);
                 peer._conn_guard = Some(guard);
                 stats.record_request(user_id);
-                if let Some(stream) = self.session_manager.dispatch(&metadata, payload) {
+                if let Some(stream) = self.session_manager.dispatch(&metadata, payload).await {
                     tracing::debug!(
                         session_id = stream.session_id(),
                         user_id,
@@ -222,7 +226,7 @@ impl UdpRelay {
                 }
             }
             ProtocolType::CloseSessionRequest | ProtocolType::CloseSessionResponse => {
-                self.session_manager.dispatch(&metadata, payload);
+                self.session_manager.dispatch(&metadata, payload).await;
                 self.sessions.remove(&session_id);
             }
             ProtocolType::AckClientToServer => {
@@ -381,7 +385,7 @@ impl UdpRelay {
         }
     }
 
-    fn cleanup_idle_sessions(&mut self) {
+    async fn cleanup_idle_sessions(&mut self) {
         let now = Instant::now();
         let stale: Vec<u32> = self
             .sessions
@@ -393,7 +397,7 @@ impl UdpRelay {
         for id in stale {
             tracing::debug!(session_id = id, "Removing idle UDP session");
             self.sessions.remove(&id);
-            self.session_manager.close_session(id);
+            self.session_manager.close_session(id).await;
         }
     }
 }
@@ -550,7 +554,7 @@ mod tests {
         let fresh = make_peer(addr);
         relay.sessions.insert(200, fresh);
 
-        relay.cleanup_idle_sessions();
+        relay.cleanup_idle_sessions().await;
 
         assert!(!relay.sessions.contains_key(&100));
         assert!(relay.sessions.contains_key(&200));
