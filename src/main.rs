@@ -137,12 +137,10 @@ async fn main() -> Result<()> {
     // Build initial registry on blocking thread to avoid starving async runtime.
     let initial_registry = {
         let mgr = Arc::clone(&user_manager);
-        tokio::task::spawn_blocking(move || UserRegistry::from_user_manager(&mgr))
-            .await?
+        tokio::task::spawn_blocking(move || UserRegistry::from_user_manager(&mgr)).await?
     };
-    let tcp_registry: Arc<tokio::sync::RwLock<Arc<UserRegistry>>> = Arc::new(
-        tokio::sync::RwLock::new(Arc::new(initial_registry)),
-    );
+    let tcp_registry: Arc<tokio::sync::RwLock<Arc<UserRegistry>>> =
+        Arc::new(tokio::sync::RwLock::new(Arc::new(initial_registry)));
     {
         let user_mgr = Arc::clone(&user_manager);
         let registry = Arc::clone(&tcp_registry);

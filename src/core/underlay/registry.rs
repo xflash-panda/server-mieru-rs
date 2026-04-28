@@ -326,8 +326,9 @@ mod tests {
     #[test]
     fn test_authenticate_with_hint_is_fast_many_users() {
         let n = 500;
-        let users: Vec<(UserId, String)> =
-            (1..=n).map(|i| (i as UserId, format!("user-uuid-{i:04}"))).collect();
+        let users: Vec<(UserId, String)> = (1..=n)
+            .map(|i| (i as UserId, format!("user-uuid-{i:04}")))
+            .collect();
         let target_uuid = "user-uuid-0500"; // last user in the list
 
         let registry = UserRegistry::from_list(users);
@@ -362,8 +363,9 @@ mod tests {
     #[test]
     fn test_hint_auth_faster_than_no_hint_auth() {
         let n = 500;
-        let users: Vec<(UserId, String)> =
-            (1..=n).map(|i| (i as UserId, format!("user-uuid-{i:04}"))).collect();
+        let users: Vec<(UserId, String)> = (1..=n)
+            .map(|i| (i as UserId, format!("user-uuid-{i:04}")))
+            .collect();
         let target_uuid = "user-uuid-0500";
 
         let registry = UserRegistry::from_list(users);
@@ -417,8 +419,9 @@ mod tests {
     #[test]
     fn test_mihomo_auth_timeslot_prioritization() {
         let n = 2000;
-        let users: Vec<(UserId, String)> =
-            (1..=n).map(|i| (i as UserId, format!("user-uuid-{i:05}"))).collect();
+        let users: Vec<(UserId, String)> = (1..=n)
+            .map(|i| (i as UserId, format!("user-uuid-{i:05}")))
+            .collect();
         let target_uuid = "user-uuid-02000"; // last user
 
         let registry = UserRegistry::from_list(users);
