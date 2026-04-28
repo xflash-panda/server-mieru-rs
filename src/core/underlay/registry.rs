@@ -115,13 +115,27 @@ impl UserRegistry {
         }
 
         // Phase 2: fallback for clients without embedded hints (e.g. mihomo).
-        // Skip the group already tried in phase 1.
+        // Time-slot prioritization: try the most-likely key (current time slot,
+        // index 1) for ALL users first, then try adjacent slots.  This reduces
+        // the common case from 3N to N AEAD decrypts.
         for (i, group) in self.user_groups.iter().enumerate() {
             if Some(i) == hint_matched_idx {
                 continue;
             }
-            if let Some(result) = try_group_keys(group, nonce, encrypted_metadata) {
+            if let Some(result) = try_single_key(group, 1, nonce, encrypted_metadata) {
                 return Some(result);
+            }
+        }
+
+        // Phase 3: try remaining time slots (0, 2) for clock-skewed clients.
+        for (i, group) in self.user_groups.iter().enumerate() {
+            if Some(i) == hint_matched_idx {
+                continue;
+            }
+            for slot_idx in [0, 2] {
+                if let Some(result) = try_single_key(group, slot_idx, nonce, encrypted_metadata) {
+                    return Some(result);
+                }
             }
         }
 
@@ -146,6 +160,22 @@ fn try_group_keys(
         {
             return Some((group.user_id, *key));
         }
+    }
+    None
+}
+
+/// Try a single key (by time-slot index) in a user group.
+fn try_single_key(
+    group: &UserKeyGroup,
+    slot_idx: usize,
+    nonce: &[u8; NONCE_SIZE],
+    encrypted_metadata: &[u8],
+) -> Option<(UserId, [u8; KEY_LEN])> {
+    if let Some(key) = group.keys.get(slot_idx)
+        && let Some(plaintext) = decrypt(key, nonce, encrypted_metadata)
+        && plaintext.len() == METADATA_LEN
+    {
+        return Some((group.user_id, *key));
     }
     None
 }
@@ -372,6 +402,64 @@ mod tests {
              ratio={:.2}x — hint optimization not working",
             nohint_time,
             hint_time,
+            ratio,
+        );
+    }
+
+    // ---- RED test: verify time-slot prioritization for mihomo ----
+
+    /// Mihomo (no-hint) auth should benefit from time-slot prioritization:
+    /// try the most-likely slot (current) for ALL users first, reducing
+    /// common-case AEAD decrypts from 3N to N.
+    ///
+    /// We measure both the optimized path and a baseline 3-key-per-user scan
+    /// to prove the optimization gives at least 1.5x speedup.
+    #[test]
+    fn test_mihomo_auth_timeslot_prioritization() {
+        let n = 2000;
+        let users: Vec<(UserId, String)> =
+            (1..=n).map(|i| (i as UserId, format!("user-uuid-{i:05}"))).collect();
+        let target_uuid = "user-uuid-02000"; // last user
+
+        let registry = UserRegistry::from_list(users);
+        let (nonce, encrypted_meta, _) = make_first_segment_no_hint(target_uuid);
+
+        // Warm up
+        let _ = registry.authenticate(&nonce, &encrypted_meta);
+
+        let iterations = 20;
+        let start = std::time::Instant::now();
+        for _ in 0..iterations {
+            let r = registry.authenticate(&nonce, &encrypted_meta);
+            assert!(r.is_some());
+        }
+        let optimized_time = start.elapsed();
+
+        // Baseline: simulate old 3N AEAD scan (all 3 keys per user before
+        // moving to next user).  Uses the same precomputed keys.
+        let start = std::time::Instant::now();
+        for _ in 0..iterations {
+            let mut _found = false;
+            'outer: for group in &registry.user_groups {
+                for key in &group.keys {
+                    if let Some(p) = decrypt(key, &nonce, &encrypted_meta) {
+                        if p.len() == METADATA_LEN {
+                            _found = true;
+                            break 'outer;
+                        }
+                    }
+                }
+            }
+        }
+        let baseline_time = start.elapsed();
+
+        let ratio = baseline_time.as_nanos() as f64 / optimized_time.as_nanos().max(1) as f64;
+        assert!(
+            ratio > 1.5,
+            "time-slot prioritization not effective: \
+             optimized={:?}, baseline={:?}, ratio={:.2}x (expected >1.5x)",
+            optimized_time / iterations,
+            baseline_time / iterations,
             ratio,
         );
     }
