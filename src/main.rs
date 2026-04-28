@@ -125,8 +125,14 @@ async fn main() -> Result<()> {
     let cancel_token = CancellationToken::new();
 
     // Shared registry for TCP listeners, refreshed every 2 minutes.
+    // Build initial registry on blocking thread to avoid starving async runtime.
+    let initial_registry = {
+        let mgr = Arc::clone(&user_manager);
+        tokio::task::spawn_blocking(move || UserRegistry::from_user_manager(&mgr))
+            .await?
+    };
     let tcp_registry: Arc<tokio::sync::RwLock<Arc<UserRegistry>>> = Arc::new(
-        tokio::sync::RwLock::new(Arc::new(UserRegistry::from_user_manager(&user_manager))),
+        tokio::sync::RwLock::new(Arc::new(initial_registry)),
     );
     {
         let user_mgr = Arc::clone(&user_manager);
@@ -138,8 +144,13 @@ async fn main() -> Result<()> {
             loop {
                 tokio::select! {
                     _ = tick.tick() => {
-                        let new = Arc::new(UserRegistry::from_user_manager(&user_mgr));
-                        *registry.write().await = new;
+                        let mgr = Arc::clone(&user_mgr);
+                        match tokio::task::spawn_blocking(move || {
+                            UserRegistry::from_user_manager(&mgr)
+                        }).await {
+                            Ok(new) => *registry.write().await = Arc::new(new),
+                            Err(e) => log::warn!(error = %e, "registry refresh failed"),
+                        }
                     }
                     _ = cancel.cancelled() => break,
                 }
