@@ -445,11 +445,11 @@ mod tests {
             let mut _found = false;
             'outer: for group in &registry.user_groups {
                 for key in &group.keys {
-                    if let Some(p) = decrypt(key, &nonce, &encrypted_meta) {
-                        if p.len() == METADATA_LEN {
-                            _found = true;
-                            break 'outer;
-                        }
+                    if let Some(p) = decrypt(key, &nonce, &encrypted_meta)
+                        && p.len() == METADATA_LEN
+                    {
+                        _found = true;
+                        break 'outer;
                     }
                 }
             }
