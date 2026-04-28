@@ -5,7 +5,7 @@
 //! - "split" (new): dispatch in one task, outbound drain in another task
 //! - try_dispatch_data: non-blocking UDP path
 
-use criterion::{BenchmarkId, Criterion, criterion_group, criterion_main};
+use criterion::{Criterion, criterion_group, criterion_main};
 use server_mieru_rs::core::metadata::{
     DataMetadata, Metadata, ProtocolType, SessionMetadata, current_timestamp_minutes,
 };
@@ -309,7 +309,7 @@ fn bench_try_dispatch_data(c: &mut Criterion) {
                 let total = 3000u32;
                 let consumer = tokio::spawn(async move {
                     let mut n = 0u32;
-                    while let Some(_) = stream.recv().await {
+                    while stream.recv().await.is_some() {
                         n += 1;
                         if n >= total {
                             break;
