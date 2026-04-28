@@ -220,7 +220,9 @@ fn bench_multi_session_comparison(c: &mut Criterion) {
                             if seg.is_none() { break; }
                         }
                     }
-                    if dispatched >= total { break; }
+                    if dispatched >= total {
+                        break;
+                    }
                 }
 
                 for id in 1..=sessions {

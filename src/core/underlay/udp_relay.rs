@@ -215,8 +215,7 @@ impl UdpRelay {
                         // Non-blocking: prevents deadlock in the UDP event
                         // loop where blocking dispatch would prevent outbound
                         // writes, causing session channels to fill up.
-                        self.session_manager
-                            .try_dispatch_data(session_id, data);
+                        self.session_manager.try_dispatch_data(session_id, data);
                     }
                 }
             }

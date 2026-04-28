@@ -126,11 +126,7 @@ impl SessionManager {
                 if !payload.is_empty()
                     && let Err(e) = data_tx.send(payload).await
                 {
-                    tracing::warn!(
-                        session_id,
-                        "failed to deliver initial payload: {}",
-                        e
-                    );
+                    tracing::warn!(session_id, "failed to deliver initial payload: {}", e);
                 }
 
                 // Send OpenSessionResponse back to the client.
@@ -145,12 +141,16 @@ impl SessionManager {
                     payload_length: 0,
                     suffix_padding_length: suffix_pad.len() as u8,
                 });
-                if let Err(e) = self.outbound_tx.send(OutboundSegment {
-                    metadata: response_meta,
-                    payload: vec![],
-                    suffix_padding: suffix_pad,
-                    prefix_padding: vec![],
-                }).await {
+                if let Err(e) = self
+                    .outbound_tx
+                    .send(OutboundSegment {
+                        metadata: response_meta,
+                        payload: vec![],
+                        suffix_padding: suffix_pad,
+                        prefix_padding: vec![],
+                    })
+                    .await
+                {
                     tracing::warn!(
                         session_id,
                         "outbound channel closed, OpenSessionResponse not sent: {}",
@@ -180,11 +180,7 @@ impl SessionManager {
                     && !payload.is_empty()
                     && let Err(e) = entry.data_tx.send(payload).await
                 {
-                    tracing::debug!(
-                        session_id,
-                        "session closed, data not delivered: {}",
-                        e
-                    );
+                    tracing::debug!(session_id, "session closed, data not delivered: {}", e);
                 }
                 None
             }
@@ -214,12 +210,16 @@ impl SessionManager {
                 payload_length: 0,
                 suffix_padding_length: suffix_pad.len() as u8,
             });
-            if let Err(e) = self.outbound_tx.send(OutboundSegment {
-                metadata: close_meta,
-                payload: vec![],
-                suffix_padding: suffix_pad,
-                prefix_padding: vec![],
-            }).await {
+            if let Err(e) = self
+                .outbound_tx
+                .send(OutboundSegment {
+                    metadata: close_meta,
+                    payload: vec![],
+                    suffix_padding: suffix_pad,
+                    prefix_padding: vec![],
+                })
+                .await
+            {
                 tracing::warn!(
                     session_id,
                     "outbound channel closed, CloseSessionResponse not sent: {}",
@@ -248,11 +248,7 @@ impl SessionManager {
             && !payload.is_empty()
             && let Err(e) = entry.data_tx.try_send(payload)
         {
-            tracing::warn!(
-                session_id,
-                "UDP session data dropped (channel full): {}",
-                e
-            );
+            tracing::warn!(session_id, "UDP session data dropped (channel full): {}", e);
         }
     }
 
@@ -728,7 +724,8 @@ mod tests {
 
         let received = consumer.await.unwrap();
         assert_eq!(
-            received, total_messages,
+            received,
+            total_messages,
             "expected {total_messages} messages but only received {received} — \
              {} messages were lost",
             total_messages - received
@@ -783,7 +780,10 @@ mod tests {
                 filled += 1;
             }
         }
-        assert!(filled > 1000, "should have filled most of the outbound channel, filled {filled}");
+        assert!(
+            filled > 1000,
+            "should have filled most of the outbound channel, filled {filled}"
+        );
 
         // Spawn a drainer so the blocking send can eventually complete.
         let drainer = tokio::spawn(async move {
