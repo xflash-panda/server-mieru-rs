@@ -10,7 +10,9 @@ use server_mieru_rs::business::mieru_hashed_password;
 use server_mieru_rs::core::crypto::{
     KEY_LEN, NONCE_SIZE, decrypt, derive_key, encrypt, time_salt, time_slots_now,
 };
-use server_mieru_rs::core::metadata::{METADATA_LEN, ProtocolType, SessionMetadata, current_timestamp_minutes};
+use server_mieru_rs::core::metadata::{
+    METADATA_LEN, ProtocolType, SessionMetadata, current_timestamp_minutes,
+};
 use server_mieru_rs::core::underlay::registry::UserRegistry;
 
 use server_mieru_rs::business::UserId;

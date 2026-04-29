@@ -164,8 +164,7 @@ impl UdpRelay {
         let (user_id, key, _nonce, metadata, payload) = {
             let packet = packet.to_vec();
             let registry = Arc::clone(registry);
-            match tokio::task::spawn_blocking(move || authenticate_packet(&packet, &registry))
-                .await
+            match tokio::task::spawn_blocking(move || authenticate_packet(&packet, &registry)).await
             {
                 Ok(Some(r)) => r,
                 Ok(None) => return,
