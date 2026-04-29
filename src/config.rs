@@ -34,7 +34,7 @@ const DEFAULT_DATA_DIR: &str = "/var/lib/mieru-agent-node";
 
 fn default_auth_concurrency() -> usize {
     std::thread::available_parallelism()
-        .map(|n| n.get())
+        .map(|n| n.get().max(4))
         .unwrap_or(4)
 }
 
