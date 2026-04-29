@@ -165,10 +165,12 @@ impl UdpRelay {
         conn_mgr: &ConnectionManager,
         relay_idle_timeout: Duration,
     ) {
-        // Acquire auth concurrency permit to limit CPU-intensive AEAD scans.
-        let _auth_permit = match auth_semaphore.acquire().await {
+        // Try to acquire auth concurrency permit. Use try_acquire (not await)
+        // to avoid blocking the UDP event loop — if the semaphore is full,
+        // drop the packet; UDP is lossy and the client will retry.
+        let _auth_permit = match auth_semaphore.try_acquire() {
             Ok(p) => p,
-            Err(_) => return, // semaphore closed
+            Err(_) => return,
         };
 
         // Authenticate on a blocking thread to avoid starving the
