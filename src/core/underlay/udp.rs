@@ -46,6 +46,30 @@ pub fn authenticate_packet(
     Some((user_id, key, nonce, metadata, payload))
 }
 
+/// Try cache-only authentication for a UDP packet (IP affinity + hot users).
+///
+/// Returns the same result as `authenticate_packet` on cache hit, or `None`
+/// on cache miss without performing a full AEAD scan.
+pub fn try_fast_auth_packet(
+    data: &[u8],
+    registry: &UserRegistry,
+    cache: &AuthCache,
+    peer_ip: Option<IpAddr>,
+) -> Option<AuthResult> {
+    if data.len() < NONCE_SIZE + METADATA_LEN + TAG_SIZE {
+        return None;
+    }
+
+    let nonce: [u8; NONCE_SIZE] = data[..NONCE_SIZE].try_into().ok()?;
+    let encrypted_meta = &data[NONCE_SIZE..NONCE_SIZE + METADATA_LEN + TAG_SIZE];
+
+    let (user_id, key) = registry.try_fast_auth(&nonce, encrypted_meta, cache, peer_ip)?;
+
+    let (_, metadata, payload) = decode_packet_segment(&key, data)?;
+
+    Some((user_id, key, nonce, metadata, payload))
+}
+
 /// Encode a response UDP packet.
 ///
 /// Generates a fresh random nonce and encodes the segment in stateless mode.
