@@ -5,6 +5,8 @@
 //! - Time-slot prioritization: current slot (N AEAD) vs naive 3N scan
 //! - Common case (current time slot hit) vs clock-skew case (adjacent slot)
 
+use std::sync::Arc;
+
 use criterion::{BenchmarkId, Criterion, criterion_group, criterion_main};
 use server_mieru_rs::business::mieru_hashed_password;
 use server_mieru_rs::core::crypto::{
@@ -13,7 +15,7 @@ use server_mieru_rs::core::crypto::{
 use server_mieru_rs::core::metadata::{
     METADATA_LEN, ProtocolType, SessionMetadata, current_timestamp_minutes,
 };
-use server_mieru_rs::core::underlay::registry::UserRegistry;
+use server_mieru_rs::core::underlay::registry::{AuthCache, UserRegistry};
 
 use server_mieru_rs::business::UserId;
 
@@ -181,6 +183,93 @@ fn bench_auth_failure(c: &mut Criterion) {
     group.finish();
 }
 
+/// Bench: AuthCache IP affinity hit vs full scan.
+/// Shows O(1) vs O(N) speedup for returning clients.
+fn bench_auth_cached_ip_hit(c: &mut Criterion) {
+    let mut group = c.benchmark_group("auth_cached_ip_hit");
+
+    for &n in &[100, 500, 2000] {
+        let registry = build_registry(n);
+        let target_uuid = format!("user-uuid-{n:05}");
+        let (nonce, encrypted_meta, _) = make_segment(&target_uuid, 1);
+        let ip: std::net::IpAddr = "10.0.0.1".parse().unwrap();
+
+        // Uncached: full AEAD scan
+        group.bench_with_input(BenchmarkId::new("uncached", n), &n, |b, _| {
+            b.iter(|| {
+                let result = registry.authenticate(&nonce, &encrypted_meta);
+                assert!(result.is_some());
+            });
+        });
+
+        // Cached: IP affinity hit (O(1) — single user, 3 time slots max)
+        let cache = Arc::new(AuthCache::new());
+        // Prime the cache
+        let _ = registry.authenticate_cached(&nonce, &encrypted_meta, &cache, Some(ip));
+
+        group.bench_with_input(BenchmarkId::new("ip_cached", n), &n, |b, _| {
+            b.iter(|| {
+                let result =
+                    registry.authenticate_cached(&nonce, &encrypted_meta, &cache, Some(ip));
+                assert!(result.is_some());
+            });
+        });
+    }
+
+    group.finish();
+}
+
+/// Bench: AuthCache hot user hit (new IP, but user in hot list).
+fn bench_auth_cached_hot_user(c: &mut Criterion) {
+    let mut group = c.benchmark_group("auth_cached_hot_user");
+
+    for &n in &[100, 500, 2000] {
+        let registry = build_registry(n);
+        let target_uuid = format!("user-uuid-{n:05}");
+        let (nonce, encrypted_meta, _) = make_segment(&target_uuid, 1);
+
+        let cache = Arc::new(AuthCache::new());
+        // Prime the cache from a different IP
+        let old_ip: std::net::IpAddr = "10.0.0.1".parse().unwrap();
+        let _ = registry.authenticate_cached(&nonce, &encrypted_meta, &cache, Some(old_ip));
+
+        // New IP — no IP hint, but hot list should help
+        let new_ip: std::net::IpAddr = "10.0.0.2".parse().unwrap();
+
+        group.bench_with_input(BenchmarkId::new("users", n), &n, |b, _| {
+            b.iter(|| {
+                let result =
+                    registry.authenticate_cached(&nonce, &encrypted_meta, &cache, Some(new_ip));
+                assert!(result.is_some());
+            });
+        });
+    }
+
+    group.finish();
+}
+
+/// Bench: AuthCache miss (unknown user) — full scan + cache overhead.
+fn bench_auth_cached_miss(c: &mut Criterion) {
+    let mut group = c.benchmark_group("auth_cached_miss");
+
+    for &n in &[100, 500, 2000] {
+        let registry = build_registry(n);
+        let (nonce, encrypted_meta, _) = make_segment("nonexistent-user", 1);
+        let cache = Arc::new(AuthCache::new());
+        let ip: std::net::IpAddr = "10.0.0.1".parse().unwrap();
+
+        group.bench_with_input(BenchmarkId::new("users", n), &n, |b, _| {
+            b.iter(|| {
+                let result =
+                    registry.authenticate_cached(&nonce, &encrypted_meta, &cache, Some(ip));
+                assert!(result.is_none());
+            });
+        });
+    }
+
+    group.finish();
+}
+
 criterion_group!(
     benches,
     bench_auth_current_slot,
@@ -188,5 +277,8 @@ criterion_group!(
     bench_timeslot_prioritization,
     bench_auth_position,
     bench_auth_failure,
+    bench_auth_cached_ip_hit,
+    bench_auth_cached_hot_user,
+    bench_auth_cached_miss,
 );
 criterion_main!(benches);

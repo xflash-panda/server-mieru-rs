@@ -19,7 +19,7 @@ use crate::core::padding;
 use crate::core::session::{OutboundSegment, SessionManager, SessionStream};
 use crate::core::underlay::congestion::CubicCongestion;
 use crate::core::underlay::recv_buf::RecvBuf;
-use crate::core::underlay::registry::UserRegistry;
+use crate::core::underlay::registry::{AuthCache, UserRegistry};
 use crate::core::underlay::rtt::RttEstimator;
 use crate::core::underlay::send_buf::SendBuf;
 use crate::core::underlay::udp::{authenticate_packet, encode_response_packet_with_padding};
@@ -78,6 +78,7 @@ impl UdpRelay {
     pub async fn run(
         mut self,
         user_manager: Arc<MieruUserManager>,
+        auth_cache: Arc<AuthCache>,
         stats: Arc<dyn StatsCollector>,
         router: Arc<dyn acl::OutboundRouter>,
         conn_mgr: ConnectionManager,
@@ -109,6 +110,7 @@ impl UdpRelay {
                                 &buf[..len],
                                 peer_addr,
                                 &registry,
+                                &auth_cache,
                                 &stats,
                                 &router,
                                 &conn_mgr,
@@ -154,6 +156,7 @@ impl UdpRelay {
         packet: &[u8],
         peer_addr: SocketAddr,
         registry: &Arc<UserRegistry>,
+        auth_cache: &Arc<AuthCache>,
         stats: &Arc<dyn StatsCollector>,
         router: &Arc<dyn acl::OutboundRouter>,
         conn_mgr: &ConnectionManager,
@@ -164,7 +167,12 @@ impl UdpRelay {
         let (user_id, key, _nonce, metadata, payload) = {
             let packet = packet.to_vec();
             let registry = Arc::clone(registry);
-            match tokio::task::spawn_blocking(move || authenticate_packet(&packet, &registry)).await
+            let cache = Arc::clone(auth_cache);
+            let peer_ip = Some(peer_addr.ip());
+            match tokio::task::spawn_blocking(move || {
+                authenticate_packet(&packet, &registry, Some(&cache), peer_ip)
+            })
+            .await
             {
                 Ok(Some(r)) => r,
                 Ok(None) => return,

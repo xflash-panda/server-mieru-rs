@@ -19,7 +19,7 @@ use business::{
 };
 use connection::ConnectionManager;
 use core::session::SessionManager;
-use core::underlay::registry::UserRegistry;
+use core::underlay::registry::{AuthCache, UserRegistry};
 use core::underlay::tcp::TcpUnderlay;
 use core::underlay::udp_relay::handle_session;
 use panel_core::PanelApi;
@@ -104,9 +104,22 @@ async fn main() -> Result<()> {
         cli.report_traffics_interval,
         cli.heartbeat_interval,
     );
+    // Shared auth cache for TCP and UDP — persists across registry rebuilds.
+    let auth_cache = Arc::new(AuthCache::new());
+
     let conn_mgr_for_kick = connection_manager.clone();
+    let auth_cache_for_diff = Arc::clone(&auth_cache);
     let on_diff = Arc::new(move |diff: panel_core::UserDiff| {
-        for uid in diff.removed_ids.iter().chain(diff.uuid_changed_ids.iter()) {
+        let removed: Vec<_> = diff
+            .removed_ids
+            .iter()
+            .chain(diff.uuid_changed_ids.iter())
+            .copied()
+            .collect();
+        if !removed.is_empty() {
+            auth_cache_for_diff.invalidate_users(&removed);
+        }
+        for uid in &removed {
             let kicked = conn_mgr_for_kick.kick_user(*uid);
             if kicked > 0 {
                 log::info!(user_id = uid, kicked, "Kicked user connections");
@@ -163,6 +176,7 @@ async fn main() -> Result<()> {
             log::info!(addr = %addr, "TCP listening");
 
             let tcp_registry = Arc::clone(&tcp_registry);
+            let tcp_auth_cache = Arc::clone(&auth_cache);
             let stats = Arc::clone(&mieru_stats);
             let router = Arc::clone(&router);
             let sem = Arc::clone(&semaphore);
@@ -187,6 +201,7 @@ async fn main() -> Result<()> {
                                     net::set_tcp_keepalive(&stream);
 
                                     let registry = Arc::clone(&*tcp_registry.read().await);
+                                    let cache = Arc::clone(&tcp_auth_cache);
                                     let stats = Arc::clone(&stats);
                                     let router = Arc::clone(&router);
                                     let conn_mgr = conn_mgr.clone();
@@ -197,6 +212,7 @@ async fn main() -> Result<()> {
                                         if let Err(e) = handle_tcp_connection(
                                             stream,
                                             &registry,
+                                            &cache,
                                             &stats,
                                             &router,
                                             &conn_mgr,
@@ -224,6 +240,7 @@ async fn main() -> Result<()> {
             log::info!(addr = %addr, "UDP listening");
 
             let user_mgr = Arc::clone(&user_manager);
+            let udp_auth_cache = Arc::clone(&auth_cache);
             let stats = Arc::clone(&mieru_stats);
             let router = Arc::clone(&router);
             let cancel = cancel_token.clone();
@@ -234,6 +251,7 @@ async fn main() -> Result<()> {
                 relay
                     .run(
                         user_mgr,
+                        udp_auth_cache,
                         stats,
                         router,
                         conn_mgr,
@@ -303,6 +321,7 @@ async fn main() -> Result<()> {
 async fn handle_tcp_connection(
     mut stream: tokio::net::TcpStream,
     registry: &Arc<UserRegistry>,
+    auth_cache: &Arc<AuthCache>,
     stats: &Arc<dyn StatsCollector>,
     router: &Arc<dyn acl::OutboundRouter>,
     conn_mgr: &ConnectionManager,
@@ -310,7 +329,7 @@ async fn handle_tcp_connection(
     relay_idle_timeout: Duration,
 ) -> Result<()> {
     let (underlay, first_meta, first_payload) =
-        TcpUnderlay::authenticate(&mut stream, registry).await?;
+        TcpUnderlay::authenticate(&mut stream, registry, Some(auth_cache)).await?;
 
     let user_id = underlay.user_id;
     let guard = conn_mgr.register(user_id);
