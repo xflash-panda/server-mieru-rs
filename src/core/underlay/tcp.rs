@@ -13,12 +13,13 @@ use crate::core::metadata::{METADATA_LEN, Metadata};
 use crate::core::segment::{
     decode_first_stream_segment, decode_stream_segment, encode_stream_segment,
 };
-use crate::core::underlay::registry::UserRegistry;
+use crate::core::underlay::registry::{AuthCache, UserRegistry};
 use crate::error::{Error, Result};
 
 use std::sync::Arc;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::TcpStream;
+use tokio::sync::Semaphore;
 
 /// A TCP underlay represents an authenticated TCP connection with stateful
 /// nonce-based encryption for both directions.
@@ -47,11 +48,18 @@ pub struct TcpUnderlayWriter {
 impl TcpUnderlay {
     /// Authenticate an incoming TCP connection by reading the first segment.
     ///
-    /// On success returns the underlay, the first metadata, and the first payload.
+    /// Uses two-phase auth when `auth_cache` and `auth_semaphore` are provided:
+    /// 1. **Fast path** (no semaphore): tries IP-affinity + hot-user cache inline.
+    /// 2. **Slow path** (with semaphore): acquires a concurrency permit, then
+    ///    does the full AEAD scan on a blocking thread.
+    ///
+    /// This ensures cached users (99%+ of traffic) never contend for semaphore
+    /// permits, while attackers (always cache-miss) are rate-limited.
     pub async fn authenticate(
         stream: &mut TcpStream,
         registry: &Arc<UserRegistry>,
-        auth_cache: Option<&Arc<super::registry::AuthCache>>,
+        auth_cache: Option<&Arc<AuthCache>>,
+        auth_semaphore: Option<&Arc<Semaphore>>,
     ) -> Result<(Self, Metadata, Vec<u8>)> {
         // The first segment starts with [nonce(24)][encrypted_meta(32)+tag(16)].
         // We must read at least the nonce + encrypted metadata to attempt auth.
@@ -60,17 +68,31 @@ impl TcpUnderlay {
         let mut header = vec![0u8; header_len];
         stream.read_exact(&mut header).await?;
 
-        // Try to authenticate using the nonce and encrypted metadata.
-        // Registry authentication is CPU-intensive (up to N AEAD decrypts
-        // for N users), so run it on a blocking thread to avoid starving
-        // the tokio async runtime.
         let nonce: [u8; NONCE_SIZE] = header[..NONCE_SIZE]
             .try_into()
             .expect("slice is NONCE_SIZE");
         let encrypted_meta = header[NONCE_SIZE..].to_vec();
-
         let peer_ip = stream.peer_addr().ok().map(|a| a.ip());
-        let (user_id, key, encrypted_meta) = {
+
+        // Phase 1: try cache fast path (IP affinity + hot users).
+        // At most ~100 AEAD decrypts — fast enough to run inline without
+        // spawn_blocking or semaphore.
+        let fast_result = if let Some(cache) = auth_cache {
+            registry.try_fast_auth(&nonce, &encrypted_meta, cache, peer_ip)
+        } else {
+            None
+        };
+
+        let (user_id, key, encrypted_meta) = if let Some((uid, key)) = fast_result {
+            (uid, key, encrypted_meta)
+        } else {
+            // Phase 2: full AEAD scan — acquire semaphore to limit CPU impact.
+            let _permit = if let Some(sem) = auth_semaphore {
+                Some(sem.acquire().await.map_err(|_| Error::AuthFailed)?)
+            } else {
+                None
+            };
+
             let registry = Arc::clone(registry);
             let cache = auth_cache.cloned();
             tokio::task::spawn_blocking(move || {

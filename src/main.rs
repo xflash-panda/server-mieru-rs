@@ -340,10 +340,9 @@ async fn handle_tcp_connection(
     cancel: CancellationToken,
     relay_idle_timeout: Duration,
 ) -> Result<()> {
-    let _auth_permit = auth_semaphore.acquire().await?;
     let (underlay, first_meta, first_payload) =
-        TcpUnderlay::authenticate(&mut stream, registry, Some(auth_cache)).await?;
-    drop(_auth_permit);
+        TcpUnderlay::authenticate(&mut stream, registry, Some(auth_cache), Some(auth_semaphore))
+            .await?;
 
     let user_id = underlay.user_id;
     let guard = conn_mgr.register(user_id);

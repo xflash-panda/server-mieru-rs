@@ -22,7 +22,9 @@ use crate::core::underlay::recv_buf::RecvBuf;
 use crate::core::underlay::registry::{AuthCache, UserRegistry};
 use crate::core::underlay::rtt::RttEstimator;
 use crate::core::underlay::send_buf::SendBuf;
-use crate::core::underlay::udp::{authenticate_packet, encode_response_packet_with_padding};
+use crate::core::underlay::udp::{
+    authenticate_packet, encode_response_packet_with_padding, try_fast_auth_packet,
+};
 use crate::outbound;
 
 const IDLE_SESSION_TIMEOUT: Duration = Duration::from_secs(60);
@@ -165,21 +167,26 @@ impl UdpRelay {
         conn_mgr: &ConnectionManager,
         relay_idle_timeout: Duration,
     ) {
-        // Try to acquire auth concurrency permit. Use try_acquire (not await)
-        // to avoid blocking the UDP event loop — if the semaphore is full,
-        // drop the packet; UDP is lossy and the client will retry.
-        let _auth_permit = match auth_semaphore.try_acquire() {
-            Ok(p) => p,
-            Err(_) => return,
-        };
+        let peer_ip = Some(peer_addr.ip());
 
-        // Authenticate on a blocking thread to avoid starving the
-        // event loop with CPU-intensive AEAD decryption attempts.
-        let (user_id, key, _nonce, metadata, payload) = {
+        // Phase 1: try cache fast path (IP affinity + hot users) inline.
+        // At most ~100 AEAD decrypts — fast enough without spawn_blocking.
+        let fast_result = try_fast_auth_packet(packet, registry, auth_cache, peer_ip);
+
+        let (user_id, key, _nonce, metadata, payload) = if let Some(r) = fast_result {
+            r
+        } else {
+            // Phase 2: full AEAD scan — try_acquire to avoid blocking the
+            // UDP event loop. If semaphore is full, drop the packet (UDP is
+            // lossy, client will retry).
+            let _auth_permit = match auth_semaphore.try_acquire() {
+                Ok(p) => p,
+                Err(_) => return,
+            };
+
             let packet = packet.to_vec();
             let registry = Arc::clone(registry);
             let cache = Arc::clone(auth_cache);
-            let peer_ip = Some(peer_addr.ip());
             match tokio::task::spawn_blocking(move || {
                 authenticate_packet(&packet, &registry, Some(&cache), peer_ip)
             })
@@ -193,7 +200,6 @@ impl UdpRelay {
                 }
             }
         };
-        drop(_auth_permit);
 
         let session_id = metadata.session_id();
         let protocol = metadata.protocol_type();

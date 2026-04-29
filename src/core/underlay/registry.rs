@@ -249,6 +249,55 @@ impl UserRegistry {
         None
     }
 
+    /// Try cache-only authentication (IP affinity + hot users).
+    ///
+    /// Does NOT fall through to a full AEAD scan. Returns `None` on cache
+    /// miss so the caller can acquire a concurrency semaphore before
+    /// performing the expensive full scan separately.
+    pub fn try_fast_auth(
+        &self,
+        nonce: &[u8; NONCE_SIZE],
+        encrypted_metadata: &[u8],
+        cache: &AuthCache,
+        peer_ip: Option<IpAddr>,
+    ) -> Option<(UserId, [u8; KEY_LEN])> {
+        if encrypted_metadata.len() < METADATA_LEN + TAG_SIZE {
+            return None;
+        }
+
+        // Layer 1: IP affinity
+        if let Some(ip) = peer_ip {
+            let cached_uid = cache.ip_hints.get(&ip).map(|r| *r);
+            if let Some(uid) = cached_uid {
+                if let Some(&idx) = self.user_index.get(&uid) {
+                    if let Some(result) =
+                        try_user_all_slots(&self.user_groups[idx], nonce, encrypted_metadata)
+                    {
+                        cache.record_success(result.0, peer_ip);
+                        return Some(result);
+                    }
+                }
+            }
+        }
+
+        // Layer 2: hot users
+        let hot = cache.hot_snapshot();
+        for uid in &hot {
+            if let Some(&idx) = self.user_index.get(uid) {
+                if let Some(result) =
+                    try_user_all_slots(&self.user_groups[idx], nonce, encrypted_metadata)
+                {
+                    cache.record_success(result.0, peer_ip);
+                    return Some(result);
+                }
+            }
+        }
+
+        // No full scan — caller should acquire semaphore and call
+        // authenticate_cached() or authenticate() for the slow path.
+        None
+    }
+
     /// Iterate over user key groups (for benchmarks).
     #[doc(hidden)]
     pub fn iter_groups(&self) -> &[UserKeyGroup] {
@@ -803,6 +852,136 @@ mod tests {
             max >= 2,
             "max concurrent auth was {max}, expected >= 2 (should saturate)"
         );
+    }
+
+    // ---- try_fast_auth: cache-only auth (no full scan) ----
+
+    #[test]
+    fn test_try_fast_auth_returns_none_on_cache_miss() {
+        // try_fast_auth should NOT fall through to full scan.
+        // Even though the user exists in the registry, a cold cache
+        // must return None so the caller can acquire a semaphore
+        // before doing the expensive full scan.
+        let uuid = "fast-auth-miss-uuid";
+        let registry = UserRegistry::from_list(vec![(42, uuid.to_string())]);
+        let cache = AuthCache::new();
+
+        let (nonce, encrypted_meta, _) = make_first_segment_no_hint(uuid);
+
+        // Cold cache: no IP hint, no hot users → must return None
+        let result = registry.try_fast_auth(&nonce, &encrypted_meta, &cache, None);
+        assert!(
+            result.is_none(),
+            "try_fast_auth should return None on cold cache (no full scan)"
+        );
+    }
+
+    #[test]
+    fn test_try_fast_auth_returns_some_on_ip_hit() {
+        // After a successful full auth, the IP is cached.
+        // Subsequent try_fast_auth from the same IP should succeed.
+        let uuid = "fast-auth-ip-uuid";
+        let registry = UserRegistry::from_list(vec![(42, uuid.to_string())]);
+        let cache = AuthCache::new();
+        let ip: IpAddr = "10.0.0.1".parse().unwrap();
+
+        let (nonce, encrypted_meta, expected_key) = make_first_segment_no_hint(uuid);
+
+        // Prime the cache via full auth
+        let _ = registry.authenticate_cached(&nonce, &encrypted_meta, &cache, Some(ip));
+
+        // Now try_fast_auth should hit IP affinity
+        let result = registry.try_fast_auth(&nonce, &encrypted_meta, &cache, Some(ip));
+        assert!(result.is_some(), "try_fast_auth should hit IP affinity");
+        let (uid, key) = result.unwrap();
+        assert_eq!(uid, 42);
+        assert_eq!(key, expected_key);
+    }
+
+    #[test]
+    fn test_try_fast_auth_returns_some_on_hot_user() {
+        // A user in the hot list (but different IP) should be found
+        // by try_fast_auth without full scan.
+        let uuid = "fast-auth-hot-uuid";
+        let registry = UserRegistry::from_list(vec![(10, uuid.to_string())]);
+        let cache = AuthCache::new();
+
+        let (nonce, encrypted_meta, _) = make_first_segment_no_hint(uuid);
+
+        // Prime cache from IP-A
+        let ip_a: IpAddr = "10.0.0.1".parse().unwrap();
+        let _ = registry.authenticate_cached(&nonce, &encrypted_meta, &cache, Some(ip_a));
+
+        // try_fast_auth from IP-B: IP miss, but hot user should match
+        let ip_b: IpAddr = "10.0.0.2".parse().unwrap();
+        let result = registry.try_fast_auth(&nonce, &encrypted_meta, &cache, Some(ip_b));
+        assert!(
+            result.is_some(),
+            "try_fast_auth should find user via hot list"
+        );
+        assert_eq!(result.unwrap().0, 10);
+    }
+
+    #[tokio::test]
+    async fn test_two_phase_auth_cache_hit_bypasses_exhausted_semaphore() {
+        // Simulates the new TCP auth flow:
+        // Phase 1: try_fast_auth (no semaphore) → cache hit → done
+        // Phase 2: only reached on miss → requires semaphore
+        //
+        // With 0 permits, cache hits must still succeed.
+        use std::sync::Arc;
+        use tokio::sync::Semaphore;
+
+        let sem = Arc::new(Semaphore::new(0)); // fully exhausted!
+        let uuid = "two-phase-uuid";
+        let registry = UserRegistry::from_list(vec![(42, uuid.to_string())]);
+        let cache = AuthCache::new();
+        let ip: IpAddr = "10.0.0.1".parse().unwrap();
+
+        let (nonce, enc, expected_key) = make_first_segment_no_hint(uuid);
+
+        // Prime cache via full auth (before semaphore was exhausted)
+        let _ = registry.authenticate_cached(&nonce, &enc, &cache, Some(ip));
+
+        // Phase 1: try_fast_auth — must succeed even with 0 permits
+        let result = registry.try_fast_auth(&nonce, &enc, &cache, Some(ip));
+        assert!(result.is_some(), "cache hit must bypass exhausted semaphore");
+        let (uid, key) = result.unwrap();
+        assert_eq!(uid, 42);
+        assert_eq!(key, expected_key);
+
+        // Semaphore untouched
+        assert_eq!(sem.available_permits(), 0);
+    }
+
+    #[tokio::test]
+    async fn test_two_phase_auth_cache_miss_needs_semaphore() {
+        // On cache miss, try_fast_auth returns None.
+        // The caller must acquire the semaphore before full scan.
+        // With 0 permits and try_acquire, the full scan is skipped.
+        use std::sync::Arc;
+        use tokio::sync::Semaphore;
+
+        let sem = Arc::new(Semaphore::new(0));
+        let uuid = "miss-needs-sem-uuid";
+        let registry = UserRegistry::from_list(vec![(42, uuid.to_string())]);
+        let cache = AuthCache::new(); // cold cache
+
+        let (nonce, enc, _) = make_first_segment_no_hint(uuid);
+
+        // Phase 1: try_fast_auth → None (cold cache)
+        let fast = registry.try_fast_auth(&nonce, &enc, &cache, None);
+        assert!(fast.is_none());
+
+        // Phase 2: try to acquire semaphore → fails (0 permits)
+        let permit = sem.try_acquire();
+        assert!(permit.is_err(), "exhausted semaphore should reject");
+
+        // If semaphore had permits, full scan would succeed:
+        let sem2 = Arc::new(Semaphore::new(1));
+        let _permit = sem2.try_acquire().unwrap();
+        let full = registry.authenticate_cached(&nonce, &enc, &cache, None);
+        assert!(full.is_some(), "full scan should find the user");
     }
 
     // ---- time-slot prioritization (kept) ----
