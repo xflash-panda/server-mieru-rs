@@ -7,7 +7,7 @@ use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use tokio::net::UdpSocket;
-use tokio::sync::mpsc;
+use tokio::sync::{Semaphore, mpsc};
 use tokio_util::sync::CancellationToken;
 
 use crate::acl::{self, OutboundType};
@@ -79,6 +79,7 @@ impl UdpRelay {
         mut self,
         user_manager: Arc<MieruUserManager>,
         auth_cache: Arc<AuthCache>,
+        auth_semaphore: Arc<Semaphore>,
         stats: Arc<dyn StatsCollector>,
         router: Arc<dyn acl::OutboundRouter>,
         conn_mgr: ConnectionManager,
@@ -111,6 +112,7 @@ impl UdpRelay {
                                 peer_addr,
                                 &registry,
                                 &auth_cache,
+                                &auth_semaphore,
                                 &stats,
                                 &router,
                                 &conn_mgr,
@@ -157,11 +159,18 @@ impl UdpRelay {
         peer_addr: SocketAddr,
         registry: &Arc<UserRegistry>,
         auth_cache: &Arc<AuthCache>,
+        auth_semaphore: &Arc<Semaphore>,
         stats: &Arc<dyn StatsCollector>,
         router: &Arc<dyn acl::OutboundRouter>,
         conn_mgr: &ConnectionManager,
         relay_idle_timeout: Duration,
     ) {
+        // Acquire auth concurrency permit to limit CPU-intensive AEAD scans.
+        let _auth_permit = match auth_semaphore.acquire().await {
+            Ok(p) => p,
+            Err(_) => return, // semaphore closed
+        };
+
         // Authenticate on a blocking thread to avoid starving the
         // event loop with CPU-intensive AEAD decryption attempts.
         let (user_id, key, _nonce, metadata, payload) = {
@@ -182,6 +191,7 @@ impl UdpRelay {
                 }
             }
         };
+        drop(_auth_permit);
 
         let session_id = metadata.session_id();
         let protocol = metadata.protocol_type();

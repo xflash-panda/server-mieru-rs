@@ -32,6 +32,12 @@ fn parse_duration(s: &str) -> Result<Duration, String> {
 
 const DEFAULT_DATA_DIR: &str = "/var/lib/mieru-agent-node";
 
+fn default_auth_concurrency() -> usize {
+    std::thread::available_parallelism()
+        .map(|n| n.get())
+        .unwrap_or(4)
+}
+
 #[derive(Parser, Debug, Clone)]
 #[command(
     author,
@@ -102,6 +108,17 @@ pub struct CliArgs {
     )]
     pub relay_idle_timeout: Duration,
 
+    /// Maximum number of concurrent authentication attempts (AEAD scans).
+    /// Limits CPU usage from brute-force or failed auth attacks.
+    /// Cached (IP-affinity) auth hits release the permit almost instantly.
+    #[arg(
+        long,
+        env = "X_PANDA_MIERU_AUTH_CONCURRENCY",
+        default_value_t = default_auth_concurrency(),
+        help_heading = "Performance"
+    )]
+    pub auth_concurrency: usize,
+
     /// IP version preference for panel API connections (auto, v4, v6).
     #[arg(
         long,
@@ -136,6 +153,9 @@ impl CliArgs {
         }
         if self.heartbeat_interval.is_zero() {
             return Err(anyhow!("heartbeat_interval must be greater than 0"));
+        }
+        if self.auth_concurrency == 0 {
+            return Err(anyhow!("auth_concurrency must be greater than 0"));
         }
         if let Some(ref path) = self.acl_conf_file {
             if !path.exists() {
@@ -247,6 +267,7 @@ mod tests {
             refresh_geodata: false,
             max_connections: 10000,
             relay_idle_timeout: Duration::from_secs(100),
+            auth_concurrency: 4,
             panel_ip_version: IpVersion::V4,
         }
     }
@@ -357,6 +378,25 @@ mod tests {
         let count_9001 = listen.ports.iter().filter(|&&p| p == 9001).count();
         assert_eq!(count_9001, 1);
         assert_eq!(listen.ports.len(), 3); // 9001, 9002, 9003
+    }
+
+    #[test]
+    fn test_default_auth_concurrency_is_positive() {
+        assert!(default_auth_concurrency() > 0);
+    }
+
+    #[test]
+    fn test_cli_args_validate_zero_auth_concurrency() {
+        let mut cli = create_test_cli_args();
+        cli.auth_concurrency = 0;
+        assert!(cli.validate().is_err());
+    }
+
+    #[test]
+    fn test_cli_args_validate_valid_auth_concurrency() {
+        let mut cli = create_test_cli_args();
+        cli.auth_concurrency = 8;
+        assert!(cli.validate().is_ok());
     }
 
     #[test]
