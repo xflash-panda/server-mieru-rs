@@ -762,6 +762,49 @@ mod tests {
         );
     }
 
+    // ---- Auth concurrency limiter tests ----
+
+    /// Verifies that a Semaphore(2) limits concurrent AEAD scans to 2.
+    /// This mirrors the auth_semaphore wiring in main.rs / udp_relay.rs.
+    #[tokio::test]
+    async fn test_auth_concurrency_limiter() {
+        use std::sync::atomic::{AtomicUsize, Ordering};
+        use std::sync::Arc;
+        use tokio::sync::Semaphore;
+
+        let auth_semaphore = Arc::new(Semaphore::new(2));
+        let concurrent = Arc::new(AtomicUsize::new(0));
+        let max_concurrent = Arc::new(AtomicUsize::new(0));
+
+        let mut handles = Vec::new();
+        for _ in 0..10 {
+            let sem = Arc::clone(&auth_semaphore);
+            let concurrent = Arc::clone(&concurrent);
+            let max_concurrent = Arc::clone(&max_concurrent);
+            handles.push(tokio::spawn(async move {
+                let _permit = sem.acquire().await.unwrap();
+                let cur = concurrent.fetch_add(1, Ordering::SeqCst) + 1;
+                max_concurrent.fetch_max(cur, Ordering::SeqCst);
+                // Simulate AEAD scan work
+                tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+                concurrent.fetch_sub(1, Ordering::SeqCst);
+                drop(_permit);
+            }));
+        }
+        for h in handles {
+            h.await.unwrap();
+        }
+        let max = max_concurrent.load(Ordering::SeqCst);
+        assert!(
+            max <= 2,
+            "max concurrent auth was {max}, expected <= 2 (semaphore capacity)"
+        );
+        assert!(
+            max >= 2,
+            "max concurrent auth was {max}, expected >= 2 (should saturate)"
+        );
+    }
+
     // ---- time-slot prioritization (kept) ----
 
     /// Time-slot prioritization: try the most-likely slot (current) for

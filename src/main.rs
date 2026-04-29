@@ -97,7 +97,13 @@ async fn main() -> Result<()> {
         Arc::new(MieruStatsCollector(Arc::clone(&stats_collector)));
     let connection_manager = ConnectionManager::new();
     let semaphore = Arc::new(Semaphore::new(cli.max_connections));
+    let auth_semaphore = Arc::new(Semaphore::new(cli.auth_concurrency));
     let relay_idle_timeout = cli.relay_idle_timeout;
+
+    log::info!(
+        auth_concurrency = cli.auth_concurrency,
+        "Auth concurrency limiter configured"
+    );
 
     let task_config = TaskConfig::new(
         cli.fetch_users_interval,
@@ -180,6 +186,7 @@ async fn main() -> Result<()> {
             let stats = Arc::clone(&mieru_stats);
             let router = Arc::clone(&router);
             let sem = Arc::clone(&semaphore);
+            let auth_sem = Arc::clone(&auth_semaphore);
             let cancel = cancel_token.clone();
             let conn_mgr = connection_manager.clone();
 
@@ -206,6 +213,7 @@ async fn main() -> Result<()> {
                                     let router = Arc::clone(&router);
                                     let conn_mgr = conn_mgr.clone();
                                     let cancel = cancel.clone();
+                                    let auth_sem = Arc::clone(&auth_sem);
 
                                     tokio::spawn(async move {
                                         let _permit = permit;
@@ -213,6 +221,7 @@ async fn main() -> Result<()> {
                                             stream,
                                             &registry,
                                             &cache,
+                                            &auth_sem,
                                             &stats,
                                             &router,
                                             &conn_mgr,
@@ -245,6 +254,7 @@ async fn main() -> Result<()> {
             let router = Arc::clone(&router);
             let cancel = cancel_token.clone();
             let conn_mgr = connection_manager.clone();
+            let auth_sem = Arc::clone(&auth_semaphore);
 
             tokio::spawn(async move {
                 let relay = core::underlay::udp_relay::UdpRelay::new(socket);
@@ -252,6 +262,7 @@ async fn main() -> Result<()> {
                     .run(
                         user_mgr,
                         udp_auth_cache,
+                        auth_sem,
                         stats,
                         router,
                         conn_mgr,
@@ -322,14 +333,17 @@ async fn handle_tcp_connection(
     mut stream: tokio::net::TcpStream,
     registry: &Arc<UserRegistry>,
     auth_cache: &Arc<AuthCache>,
+    auth_semaphore: &Arc<Semaphore>,
     stats: &Arc<dyn StatsCollector>,
     router: &Arc<dyn acl::OutboundRouter>,
     conn_mgr: &ConnectionManager,
     cancel: CancellationToken,
     relay_idle_timeout: Duration,
 ) -> Result<()> {
+    let _auth_permit = auth_semaphore.acquire().await?;
     let (underlay, first_meta, first_payload) =
         TcpUnderlay::authenticate(&mut stream, registry, Some(auth_cache)).await?;
+    drop(_auth_permit);
 
     let user_id = underlay.user_id;
     let guard = conn_mgr.register(user_id);
