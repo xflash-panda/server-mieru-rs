@@ -4,11 +4,14 @@
 //! no implicit nonce state -- the same nonce is used for both metadata and
 //! payload within a single packet.
 
+use std::net::IpAddr;
+use std::sync::Arc;
+
 use crate::business::UserId;
 use crate::core::crypto::{KEY_LEN, NONCE_SIZE, TAG_SIZE};
 use crate::core::metadata::{METADATA_LEN, Metadata};
 use crate::core::segment::{decode_packet_segment, encode_packet_segment};
-use crate::core::underlay::registry::UserRegistry;
+use crate::core::underlay::registry::{AuthCache, UserRegistry};
 
 /// Result of authenticating a UDP packet: (user_id, key, nonce, metadata, payload).
 type AuthResult = (UserId, [u8; KEY_LEN], [u8; NONCE_SIZE], Metadata, Vec<u8>);
@@ -16,7 +19,12 @@ type AuthResult = (UserId, [u8; KEY_LEN], [u8; NONCE_SIZE], Metadata, Vec<u8>);
 /// Authenticate and decode a single UDP packet.
 ///
 /// Returns `(user_id, key, nonce, metadata, payload)` on success.
-pub fn authenticate_packet(data: &[u8], registry: &UserRegistry) -> Option<AuthResult> {
+pub fn authenticate_packet(
+    data: &[u8],
+    registry: &UserRegistry,
+    auth_cache: Option<&Arc<AuthCache>>,
+    peer_ip: Option<IpAddr>,
+) -> Option<AuthResult> {
     // Minimum size: nonce + encrypted_metadata + tag.
     if data.len() < NONCE_SIZE + METADATA_LEN + TAG_SIZE {
         return None;
@@ -26,7 +34,11 @@ pub fn authenticate_packet(data: &[u8], registry: &UserRegistry) -> Option<AuthR
     let nonce: [u8; NONCE_SIZE] = data[..NONCE_SIZE].try_into().ok()?;
     let encrypted_meta = &data[NONCE_SIZE..NONCE_SIZE + METADATA_LEN + TAG_SIZE];
 
-    let (user_id, key) = registry.authenticate(&nonce, encrypted_meta)?;
+    let (user_id, key) = if let Some(cache) = auth_cache {
+        registry.authenticate_cached(&nonce, encrypted_meta, cache, peer_ip)?
+    } else {
+        registry.authenticate(&nonce, encrypted_meta)?
+    };
 
     // Now decode the full packet with the known key.
     let (_, metadata, payload) = decode_packet_segment(&key, data)?;
@@ -160,7 +172,7 @@ mod tests {
         let payload = b"authenticated udp data";
         let (packet, expected_key) = make_client_packet(&uuid, payload);
 
-        let result = authenticate_packet(&packet, &registry);
+        let result = authenticate_packet(&packet, &registry, None, None);
         assert!(result.is_some(), "auth should succeed");
 
         let (user_id, key, _nonce, metadata, dec_payload) = result.unwrap();
@@ -178,7 +190,7 @@ mod tests {
         let payload = b"unknown user data";
         let (packet, _) = make_client_packet("unknown-uuid-9999", payload);
 
-        let result = authenticate_packet(&packet, &registry);
+        let result = authenticate_packet(&packet, &registry, None, None);
         assert!(result.is_none(), "unknown user should fail auth");
     }
 
@@ -186,7 +198,7 @@ mod tests {
     fn test_udp_authenticate_packet_too_short() {
         let registry = UserRegistry::from_list(vec![]);
         let short_data = vec![0u8; 10];
-        assert!(authenticate_packet(&short_data, &registry).is_none());
+        assert!(authenticate_packet(&short_data, &registry, None, None).is_none());
     }
 
     #[test]

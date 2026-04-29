@@ -51,6 +51,7 @@ impl TcpUnderlay {
     pub async fn authenticate(
         stream: &mut TcpStream,
         registry: &Arc<UserRegistry>,
+        auth_cache: Option<&Arc<super::registry::AuthCache>>,
     ) -> Result<(Self, Metadata, Vec<u8>)> {
         // The first segment starts with [nonce(24)][encrypted_meta(32)+tag(16)].
         // We must read at least the nonce + encrypted metadata to attempt auth.
@@ -68,12 +69,20 @@ impl TcpUnderlay {
             .expect("slice is NONCE_SIZE");
         let encrypted_meta = header[NONCE_SIZE..].to_vec();
 
+        let peer_ip = stream.peer_addr().ok().map(|a| a.ip());
         let (user_id, key, encrypted_meta) = {
             let registry = Arc::clone(registry);
+            let cache = auth_cache.cloned();
             tokio::task::spawn_blocking(move || {
-                registry
-                    .authenticate(&nonce, &encrypted_meta)
-                    .map(|(uid, k)| (uid, k, encrypted_meta))
+                if let Some(ref cache) = cache {
+                    registry
+                        .authenticate_cached(&nonce, &encrypted_meta, cache, peer_ip)
+                        .map(|(uid, k)| (uid, k, encrypted_meta))
+                } else {
+                    registry
+                        .authenticate(&nonce, &encrypted_meta)
+                        .map(|(uid, k)| (uid, k, encrypted_meta))
+                }
             })
             .await
             .map_err(|_| Error::AuthFailed)?
