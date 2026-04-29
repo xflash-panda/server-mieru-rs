@@ -302,7 +302,7 @@ async fn main() -> Result<()> {
 
 async fn handle_tcp_connection(
     mut stream: tokio::net::TcpStream,
-    registry: &UserRegistry,
+    registry: &Arc<UserRegistry>,
     stats: &Arc<dyn StatsCollector>,
     router: &Arc<dyn acl::OutboundRouter>,
     conn_mgr: &ConnectionManager,

@@ -153,16 +153,27 @@ impl UdpRelay {
         &mut self,
         packet: &[u8],
         peer_addr: SocketAddr,
-        registry: &UserRegistry,
+        registry: &Arc<UserRegistry>,
         stats: &Arc<dyn StatsCollector>,
         router: &Arc<dyn acl::OutboundRouter>,
         conn_mgr: &ConnectionManager,
         relay_idle_timeout: Duration,
     ) {
-        let (user_id, key, _nonce, metadata, payload) = match authenticate_packet(packet, registry)
-        {
-            Some(r) => r,
-            None => return,
+        // Authenticate on a blocking thread to avoid starving the
+        // event loop with CPU-intensive AEAD decryption attempts.
+        let (user_id, key, _nonce, metadata, payload) = {
+            let packet = packet.to_vec();
+            let registry = Arc::clone(registry);
+            match tokio::task::spawn_blocking(move || authenticate_packet(&packet, &registry))
+                .await
+            {
+                Ok(Some(r)) => r,
+                Ok(None) => return,
+                Err(e) => {
+                    tracing::debug!(error = %e, "UDP auth spawn_blocking failed");
+                    return;
+                }
+            }
         };
 
         let session_id = metadata.session_id();

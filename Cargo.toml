@@ -1,6 +1,6 @@
 [package]
 name = "server-mieru-rs"
-version = "0.1.6"
+version = "0.1.7"
 edition = "2024"
 
 [[bin]]
@@ -45,6 +45,10 @@ criterion = { version = "0.5", features = ["async_tokio"] }
 
 [[bench]]
 name = "session_throughput"
+harness = false
+
+[[bench]]
+name = "auth_performance"
 harness = false
 
 [profile.release]

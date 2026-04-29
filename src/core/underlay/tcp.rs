@@ -16,6 +16,7 @@ use crate::core::segment::{
 use crate::core::underlay::registry::UserRegistry;
 use crate::error::{Error, Result};
 
+use std::sync::Arc;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::TcpStream;
 
@@ -49,7 +50,7 @@ impl TcpUnderlay {
     /// On success returns the underlay, the first metadata, and the first payload.
     pub async fn authenticate(
         stream: &mut TcpStream,
-        registry: &UserRegistry,
+        registry: &Arc<UserRegistry>,
     ) -> Result<(Self, Metadata, Vec<u8>)> {
         // The first segment starts with [nonce(24)][encrypted_meta(32)+tag(16)].
         // We must read at least the nonce + encrypted metadata to attempt auth.
@@ -59,17 +60,28 @@ impl TcpUnderlay {
         stream.read_exact(&mut header).await?;
 
         // Try to authenticate using the nonce and encrypted metadata.
+        // Registry authentication is CPU-intensive (up to N AEAD decrypts
+        // for N users), so run it on a blocking thread to avoid starving
+        // the tokio async runtime.
         let nonce: [u8; NONCE_SIZE] = header[..NONCE_SIZE]
             .try_into()
             .expect("slice is NONCE_SIZE");
-        let encrypted_meta = &header[NONCE_SIZE..];
+        let encrypted_meta = header[NONCE_SIZE..].to_vec();
 
-        let (user_id, key) = registry
-            .authenticate(&nonce, encrypted_meta)
-            .ok_or(Error::AuthFailed)?;
+        let (user_id, key, encrypted_meta) = {
+            let registry = Arc::clone(registry);
+            tokio::task::spawn_blocking(move || {
+                registry
+                    .authenticate(&nonce, &encrypted_meta)
+                    .map(|(uid, k)| (uid, k, encrypted_meta))
+            })
+            .await
+            .map_err(|_| Error::AuthFailed)?
+            .ok_or(Error::AuthFailed)?
+        };
 
         // Decrypt the metadata to find out how much more to read.
-        let meta_plain = crate::core::crypto::decrypt(&key, &nonce, encrypted_meta)
+        let meta_plain = crate::core::crypto::decrypt(&key, &nonce, &encrypted_meta)
             .ok_or(Error::DecryptionFailed)?;
         let meta_arr: [u8; METADATA_LEN] = meta_plain
             .try_into()
