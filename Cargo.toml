@@ -1,6 +1,6 @@
 [package]
 name = "server-mieru-rs"
-version = "0.1.10"
+version = "0.1.11"
 edition = "2024"
 
 [[bin]]
@@ -31,8 +31,8 @@ serde_yaml = "0.9"
 humantime = "2"
 tracing-subscriber = { version = "0.3", features = ["time", "local-time"] }
 time = { version = "0.3", features = ["formatting", "macros", "local-offset"] }
-panel-core = { git = "https://github.com/xflash-panda/server-panel-rs.git", tag = "v0.1.11" }
-panel-connect-rpc = { git = "https://github.com/xflash-panda/server-panel-rs.git", tag = "v0.1.11" }
+panel-core = { git = "https://github.com/xflash-panda/server-panel-rs.git", tag = "v0.1.13" }
+panel-connect-rpc = { git = "https://github.com/xflash-panda/server-panel-rs.git", tag = "v0.1.13" }
 rustls = { version = "0.23", features = ["aws_lc_rs"] }
 acl-engine-rs = { git = "https://github.com/xflash-panda/acl-engine-rs.git", tag = "v0.4.4", features = ["async"] }
 socket2 = "0.6"
