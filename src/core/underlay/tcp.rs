@@ -86,9 +86,14 @@ impl TcpUnderlay {
         let (user_id, key, encrypted_meta) = if let Some((uid, key)) = fast_result {
             (uid, key, encrypted_meta)
         } else {
-            // Phase 2: full AEAD scan — acquire semaphore to limit CPU impact.
+            // Phase 2: full AEAD scan — try_acquire to drop excess on
+            // saturation. Mirrors the UDP fix in udp_relay.rs: under attack,
+            // unbounded `acquire().await` would pile up tokio tasks each
+            // holding a TcpStream + Arc clones, exhausting RAM. Legitimate
+            // bursts at this scale stay well under the per-permit ~6ms scan
+            // time, so try_acquire failures are confined to true overload.
             let _permit = if let Some(sem) = auth_semaphore {
-                Some(sem.acquire().await.map_err(|_| Error::AuthFailed)?)
+                Some(sem.try_acquire().map_err(|_| Error::AuthFailed)?)
             } else {
                 None
             };
@@ -755,4 +760,82 @@ mod tests {
         // Nonce states must be synchronized.
         assert_eq!(client_nonce, dec_nonce);
     }
+
+    // -----------------------------------------------------------------------
+    // Regression: TCP auth must drop on saturated semaphore, not queue.
+    //
+    // History: an earlier `sem.acquire().await` allowed cache-miss attackers
+    // to pile up tokio tasks each holding a TcpStream + Arc clones, exhausting
+    // RAM on small VMs (1G / 2C, 2000 users). UDP was fixed first; this test
+    // pins the TCP path to the same drop-on-full semantics.
+    // -----------------------------------------------------------------------
+
+    /// `TcpUnderlay::authenticate` must return `Err` immediately when the
+    /// auth semaphore is exhausted, instead of parking on the await queue.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn authenticate_drops_when_semaphore_exhausted() {
+        use crate::core::underlay::registry::{AuthCache, UserRegistry};
+        use std::sync::Arc;
+        use std::time::Duration;
+        use tokio::io::AsyncWriteExt;
+        use tokio::net::{TcpListener, TcpStream};
+        use tokio::sync::Semaphore;
+
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let server_addr = listener.local_addr().unwrap();
+
+        let registry = Arc::new(UserRegistry::from_list(vec![(1, "real-user".into())]));
+        let cache = Arc::new(AuthCache::new());
+        let sem = Arc::new(Semaphore::new(1));
+        let _hold = sem.clone().try_acquire_owned().unwrap();
+
+        let server = {
+            let registry = Arc::clone(&registry);
+            let cache = Arc::clone(&cache);
+            let sem = Arc::clone(&sem);
+            tokio::spawn(async move {
+                let (mut stream, _) = listener.accept().await.unwrap();
+                TcpUnderlay::authenticate(&mut stream, &registry, Some(&cache), Some(&sem)).await
+            })
+        };
+
+        let mut s = TcpStream::connect(server_addr).await.unwrap();
+        let header = [0xA5u8; NONCE_SIZE + METADATA_LEN + TAG_SIZE];
+        s.write_all(&header).await.unwrap();
+
+        let outcome = tokio::time::timeout(Duration::from_secs(2), server)
+            .await
+            .expect("authenticate must not park on the semaphore queue");
+        let inner = outcome.expect("server task panicked");
+        assert!(
+            inner.is_err(),
+            "exhausted auth semaphore must reject the connection"
+        );
+    }
+
+    /// Pinned semantics for the auth-semaphore: every excess attempt drops
+    /// instead of queueing. Matches the pattern used by both TCP (after the
+    /// fix) and UDP (`udp_relay.rs:182`).
+    #[tokio::test]
+    async fn auth_semaphore_try_acquire_drops_excess() {
+        use std::sync::Arc;
+        use tokio::sync::Semaphore;
+
+        let sem = Arc::new(Semaphore::new(1));
+        let _hold = sem.clone().try_acquire_owned().unwrap();
+
+        let n = 1000;
+        let mut accepted = 0usize;
+        let mut dropped = 0usize;
+        for _ in 0..n {
+            match sem.try_acquire() {
+                Ok(_p) => accepted += 1,
+                Err(_) => dropped += 1,
+            }
+        }
+
+        assert_eq!(accepted, 0);
+        assert_eq!(dropped, n, "every excess attempt must drop, no queueing");
+    }
+
 }
