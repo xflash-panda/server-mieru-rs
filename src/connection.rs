@@ -24,6 +24,11 @@ pub struct ConnectionGuard {
 
 impl Drop for ConnectionGuard {
     fn drop(&mut self) {
+        // Fire the cancel token so dependent tasks (read loop, write task,
+        // session relays) observe shutdown when the guard drops. Without this,
+        // tasks that select on `cancel.cancelled()` hang until other signals
+        // (e.g. broken pipe) fire, leaving sockets in CLOSE-WAIT.
+        self.cancel.cancel();
         self.connections.remove(&self.id);
     }
 }
@@ -125,6 +130,65 @@ mod tests {
         let mgr = ConnectionManager::new();
         let _g = mgr.register(1);
         assert_eq!(mgr.kick_user(999), 0);
+    }
+
+    #[tokio::test]
+    async fn test_guard_drop_fires_cancel_token() {
+        // Reproduces the CLOSE-WAIT leak: handle_tcp_connection's write_task
+        // observes guard.cancel.cancelled() to break its loop. If Drop doesn't
+        // fire the cancel, write_task hangs (waiting on outbound_rx.recv()),
+        // holding write_half, leaving the inbound TCP socket in CLOSE-WAIT.
+        let mgr = ConnectionManager::new();
+        let guard = mgr.register(1);
+        let cancel = guard.cancel.clone();
+
+        let task = tokio::spawn(async move {
+            cancel.cancelled().await;
+        });
+
+        drop(guard);
+
+        tokio::time::timeout(std::time::Duration::from_millis(100), task)
+            .await
+            .expect("dependent task should complete within 100ms after guard drop")
+            .expect("dependent task should not panic");
+    }
+
+    #[tokio::test]
+    async fn test_write_task_pattern_unblocks_on_guard_drop() {
+        // Reproduces the EXACT write_task structure from main.rs: a select!
+        // loop that picks between outbound_rx.recv() and guard.cancel.cancelled().
+        // The outbound_tx is intentionally kept alive (mimicking sessions still
+        // holding clones), so outbound_rx.recv() will never return None on its
+        // own. The ONLY way the task can exit is via guard cancel.
+        //
+        // This proves that fix #1 (cancel on guard drop) makes the awkward
+        // `tokio::time::timeout(2s, write_task)` pattern in main.rs:466
+        // correct in practice — fix B is not required for the CLOSE-WAIT bug.
+        let mgr = ConnectionManager::new();
+        let guard = mgr.register(1);
+        let guard_cancel = guard.cancel.clone();
+
+        let (_outbound_tx_kept_alive, mut outbound_rx) =
+            tokio::sync::mpsc::channel::<()>(8);
+
+        let task = tokio::spawn(async move {
+            loop {
+                tokio::select! {
+                    msg = outbound_rx.recv() => {
+                        if msg.is_none() { break; }
+                    }
+                    _ = guard_cancel.cancelled() => break,
+                }
+            }
+        });
+
+        drop(guard);
+
+        tokio::time::timeout(std::time::Duration::from_millis(100), task)
+            .await
+            .expect("write_task pattern should exit within 100ms after guard drop")
+            .expect("task should not panic");
     }
 
     #[tokio::test]
