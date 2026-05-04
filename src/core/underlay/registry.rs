@@ -60,6 +60,12 @@ pub struct AuthCache {
     hot_users: Mutex<VecDeque<UserId>>,
 }
 
+impl Default for AuthCache {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl AuthCache {
     pub fn new() -> Self {
         Self {
@@ -215,28 +221,25 @@ impl UserRegistry {
         // before calling record_success (which needs a write lock).
         if let Some(ip) = peer_ip {
             let cached_uid = cache.ip_hints.get(&ip).map(|r| *r);
-            if let Some(uid) = cached_uid {
-                if let Some(&idx) = self.user_index.get(&uid) {
-                    if let Some(result) =
-                        try_user_all_slots(&self.user_groups[idx], nonce, encrypted_metadata)
-                    {
-                        cache.record_success(result.0, peer_ip);
-                        return Some(result);
-                    }
-                }
+            if let Some(uid) = cached_uid
+                && let Some(&idx) = self.user_index.get(&uid)
+                && let Some(result) =
+                    try_user_all_slots(&self.user_groups[idx], nonce, encrypted_metadata)
+            {
+                cache.record_success(result.0, peer_ip);
+                return Some(result);
             }
         }
 
         // Layer 2: hot users — try recently-authenticated users.
         let hot = cache.hot_snapshot();
         for uid in &hot {
-            if let Some(&idx) = self.user_index.get(uid) {
-                if let Some(result) =
+            if let Some(&idx) = self.user_index.get(uid)
+                && let Some(result) =
                     try_user_all_slots(&self.user_groups[idx], nonce, encrypted_metadata)
-                {
-                    cache.record_success(result.0, peer_ip);
-                    return Some(result);
-                }
+            {
+                cache.record_success(result.0, peer_ip);
+                return Some(result);
             }
         }
 
@@ -268,28 +271,25 @@ impl UserRegistry {
         // Layer 1: IP affinity
         if let Some(ip) = peer_ip {
             let cached_uid = cache.ip_hints.get(&ip).map(|r| *r);
-            if let Some(uid) = cached_uid {
-                if let Some(&idx) = self.user_index.get(&uid) {
-                    if let Some(result) =
-                        try_user_all_slots(&self.user_groups[idx], nonce, encrypted_metadata)
-                    {
-                        cache.record_success(result.0, peer_ip);
-                        return Some(result);
-                    }
-                }
+            if let Some(uid) = cached_uid
+                && let Some(&idx) = self.user_index.get(&uid)
+                && let Some(result) =
+                    try_user_all_slots(&self.user_groups[idx], nonce, encrypted_metadata)
+            {
+                cache.record_success(result.0, peer_ip);
+                return Some(result);
             }
         }
 
         // Layer 2: hot users
         let hot = cache.hot_snapshot();
         for uid in &hot {
-            if let Some(&idx) = self.user_index.get(uid) {
-                if let Some(result) =
+            if let Some(&idx) = self.user_index.get(uid)
+                && let Some(result) =
                     try_user_all_slots(&self.user_groups[idx], nonce, encrypted_metadata)
-                {
-                    cache.record_success(result.0, peer_ip);
-                    return Some(result);
-                }
+            {
+                cache.record_success(result.0, peer_ip);
+                return Some(result);
             }
         }
 
@@ -620,8 +620,7 @@ mod tests {
         let uncached_time = start.elapsed();
 
         // IP-cached should be noticeably faster even with just 50 users
-        let speedup =
-            uncached_time.as_nanos() as f64 / cached_time.as_nanos().max(1) as f64;
+        let speedup = uncached_time.as_nanos() as f64 / cached_time.as_nanos().max(1) as f64;
         assert!(
             speedup > 2.0,
             "IP-cached auth ({:?}/call) should be faster than uncached ({:?}/call), \
@@ -708,7 +707,12 @@ mod tests {
         cache.invalidate_users(&[]);
 
         assert_eq!(cache.hot_snapshot(), vec![1]);
-        assert!(cache.ip_hints.get(&"10.0.0.1".parse::<IpAddr>().unwrap()).is_some());
+        assert!(
+            cache
+                .ip_hints
+                .get(&"10.0.0.1".parse::<IpAddr>().unwrap())
+                .is_some()
+        );
     }
 
     // ---- RED tests: no user hint in mieru v3 protocol ----
@@ -817,8 +821,8 @@ mod tests {
     /// This mirrors the auth_semaphore wiring in main.rs / udp_relay.rs.
     #[tokio::test]
     async fn test_auth_concurrency_limiter() {
-        use std::sync::atomic::{AtomicUsize, Ordering};
         use std::sync::Arc;
+        use std::sync::atomic::{AtomicUsize, Ordering};
         use tokio::sync::Semaphore;
 
         let auth_semaphore = Arc::new(Semaphore::new(2));
@@ -945,7 +949,10 @@ mod tests {
 
         // Phase 1: try_fast_auth — must succeed even with 0 permits
         let result = registry.try_fast_auth(&nonce, &enc, &cache, Some(ip));
-        assert!(result.is_some(), "cache hit must bypass exhausted semaphore");
+        assert!(
+            result.is_some(),
+            "cache hit must bypass exhausted semaphore"
+        );
         let (uid, key) = result.unwrap();
         assert_eq!(uid, 42);
         assert_eq!(key, expected_key);

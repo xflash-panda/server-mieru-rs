@@ -169,8 +169,7 @@ mod tests {
         let guard = mgr.register(1);
         let guard_cancel = guard.cancel.clone();
 
-        let (_outbound_tx_kept_alive, mut outbound_rx) =
-            tokio::sync::mpsc::channel::<()>(8);
+        let (_outbound_tx_kept_alive, mut outbound_rx) = tokio::sync::mpsc::channel::<()>(8);
 
         let task = tokio::spawn(async move {
             loop {
