@@ -77,6 +77,7 @@ impl UdpRelay {
     }
 
     /// Main event loop. Runs until cancelled.
+    #[allow(clippy::too_many_arguments)]
     pub async fn run(
         mut self,
         user_manager: Arc<MieruUserManager>,

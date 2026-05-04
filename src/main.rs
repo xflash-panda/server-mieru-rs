@@ -338,6 +338,7 @@ async fn main() -> Result<()> {
     Ok(())
 }
 
+#[allow(clippy::too_many_arguments)]
 async fn handle_tcp_connection(
     mut stream: tokio::net::TcpStream,
     registry: &Arc<UserRegistry>,
@@ -349,9 +350,13 @@ async fn handle_tcp_connection(
     cancel: CancellationToken,
     relay_idle_timeout: Duration,
 ) -> Result<()> {
-    let (underlay, first_meta, first_payload) =
-        TcpUnderlay::authenticate(&mut stream, registry, Some(auth_cache), Some(auth_semaphore))
-            .await?;
+    let (underlay, first_meta, first_payload) = TcpUnderlay::authenticate(
+        &mut stream,
+        registry,
+        Some(auth_cache),
+        Some(auth_semaphore),
+    )
+    .await?;
 
     let user_id = underlay.user_id;
     let guard = conn_mgr.register(user_id);
