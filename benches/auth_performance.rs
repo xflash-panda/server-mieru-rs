@@ -121,11 +121,11 @@ fn bench_timeslot_prioritization(c: &mut Criterion) {
             let mut found = false;
             'outer: for group in registry.iter_groups() {
                 for key in group.keys() {
-                    if let Some(p) = decrypt(key, &nonce, &encrypted_meta) {
-                        if p.len() == METADATA_LEN {
-                            found = true;
-                            break 'outer;
-                        }
+                    if let Some(p) = decrypt(key, &nonce, &encrypted_meta)
+                        && p.len() == METADATA_LEN
+                    {
+                        found = true;
+                        break 'outer;
                     }
                 }
             }

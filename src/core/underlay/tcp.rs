@@ -837,5 +837,4 @@ mod tests {
         assert_eq!(accepted, 0);
         assert_eq!(dropped, n, "every excess attempt must drop, no queueing");
     }
-
 }
