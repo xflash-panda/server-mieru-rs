@@ -20,11 +20,35 @@ updates:
     commit-message:
       prefix: "deps"
 
+  - package-ecosystem: cargo
+    directory: /
+    registries:
+      - xflash-panda-git
+    schedule:
+      interval: weekly
+    target-branch: dev/agent-master
+    open-pull-requests-limit: 10
+    labels:
+      - dependencies
+    commit-message:
+      prefix: "deps"
+
   - package-ecosystem: github-actions
     directory: /
     schedule:
       interval: weekly
     target-branch: dev/master
+    open-pull-requests-limit: 5
+    labels:
+      - ci
+    commit-message:
+      prefix: "ci"
+
+  - package-ecosystem: github-actions
+    directory: /
+    schedule:
+      interval: weekly
+    target-branch: dev/agent-master
     open-pull-requests-limit: 5
     labels:
       - ci
