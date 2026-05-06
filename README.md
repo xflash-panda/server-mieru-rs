@@ -34,7 +34,7 @@ server-mieru-agent \
 | `--data_dir` | `X_PANDA_MIERU_DATA_DIR` | `/var/lib/mieru-agent-node` | Data directory |
 | `--acl_conf_file` | `X_PANDA_MIERU_ACL_CONF_FILE` | — | ACL config file (.yaml) |
 | `--block_private_ip` | `X_PANDA_MIERU_BLOCK_PRIVATE_IP` | `true` | Block private IP destinations |
-| `--max_connections` | `X_PANDA_MIERU_MAX_CONNECTIONS` | `10000` | Max concurrent connections |
+| `--max_connections` | `X_PANDA_MIERU_MAX_CONNECTIONS` | `auto` | Max concurrent connections. `auto` derives a cap from `min(cpu_throughput, ram_budget, fd_limit)`; pass a positive integer to override. |
 | `--relay_idle_timeout` | `X_PANDA_MIERU_RELAY_IDLE_TIMEOUT` | `100s` | Relay idle timeout |
 | `--api_timeout` | `X_PANDA_MIERU_API_TIMEOUT` | `15s` | Panel API timeout |
 | `--fetch_users_interval` | `X_PANDA_MIERU_FETCH_USERS_INTERVAL` | `60s` | User sync interval |

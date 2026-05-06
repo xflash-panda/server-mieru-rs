@@ -2,6 +2,7 @@ use logger::log;
 use server_mieru_rs::acl;
 use server_mieru_rs::business;
 use server_mieru_rs::config;
+use server_mieru_rs::config_auto;
 use server_mieru_rs::connection;
 use server_mieru_rs::core;
 use server_mieru_rs::logger;
@@ -105,7 +106,40 @@ async fn main() -> Result<()> {
     let mieru_stats: Arc<dyn StatsCollector> =
         Arc::new(MieruStatsCollector(Arc::clone(&stats_collector)));
     let connection_manager = ConnectionManager::new();
-    let semaphore = Arc::new(Semaphore::new(cli.max_connections));
+
+    let resolved_max = config_auto::resolve(cli.max_connections);
+    let bd = resolved_max.breakdown;
+    let mode = match resolved_max.mode {
+        config_auto::ResolveMode::Auto => "auto",
+        config_auto::ResolveMode::Fixed => "fixed",
+    };
+    log::info!(
+        mode = mode,
+        value = resolved_max.value,
+        cpus = resolved_max.cpus,
+        total_mem_kb = resolved_max.total_mem_kb,
+        nofile_soft = resolved_max.nofile_soft,
+        cpu_cap = bd.cpu_cap,
+        mem_cap = bd.mem_cap,
+        fd_cap = bd.fd_cap,
+        limiting = bd.limiting.as_str(),
+        "max_connections resolved"
+    );
+    if resolved_max.mode == config_auto::ResolveMode::Fixed {
+        let v = resolved_max.value as u64;
+        if v > bd.cpu_cap || v > bd.mem_cap || v > bd.fd_cap {
+            log::warn!(
+                value = resolved_max.value,
+                cpu_cap = bd.cpu_cap,
+                mem_cap = bd.mem_cap,
+                fd_cap = bd.fd_cap,
+                limiting = bd.limiting.as_str(),
+                "max_connections=fixed exceeds the auto-derived safe cap"
+            );
+        }
+    }
+
+    let semaphore = Arc::new(Semaphore::new(resolved_max.value));
     let auth_semaphore = Arc::new(Semaphore::new(cli.auth_concurrency));
     let relay_idle_timeout = cli.relay_idle_timeout;
 
