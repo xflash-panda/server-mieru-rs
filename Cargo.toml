@@ -1,6 +1,6 @@
 [package]
 name = "server-mieru-rs"
-version = "0.1.13"
+version = "0.1.14"
 edition = "2024"
 
 [[bin]]
@@ -36,6 +36,7 @@ panel-connect-rpc = { git = "https://github.com/xflash-panda/server-panel-rs.git
 rustls = { version = "0.23", features = ["aws_lc_rs"] }
 acl-engine-rs = { git = "https://github.com/xflash-panda/acl-engine-rs.git", tag = "v0.4.4", features = ["async"] }
 socket2 = "0.6"
+libc = "0.2"
 
 [target.'cfg(not(target_env = "msvc"))'.dependencies]
 tikv-jemallocator = "0.6"
