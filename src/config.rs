@@ -5,6 +5,7 @@ use std::path::PathBuf;
 use std::time::Duration;
 
 use crate::business::IpVersion;
+use crate::config_auto::MaxConnections;
 
 fn parse_ip_version(s: &str) -> Result<IpVersion, String> {
     match s.to_lowercase().as_str() {
@@ -88,14 +89,15 @@ pub struct CliArgs {
     #[arg(long, env = "X_PANDA_MIERU_REFRESH_GEODATA", default_value_t = false, action = clap::ArgAction::Set)]
     pub refresh_geodata: bool,
 
-    /// Maximum number of concurrent connections.
+    /// Maximum number of concurrent connections. Use 'auto' to derive a
+    /// sensible cap from CPU cores, total RAM, and the file-descriptor limit.
     #[arg(
         long,
         env = "X_PANDA_MIERU_MAX_CONNECTIONS",
-        default_value_t = 10000,
+        default_value = "auto",
         help_heading = "Performance"
     )]
-    pub max_connections: usize,
+    pub max_connections: MaxConnections,
 
     /// Maximum time a relay may be idle (no bytes in either direction) before
     /// being terminated. Prevents connections from hanging indefinitely.
@@ -265,7 +267,7 @@ mod tests {
             acl_conf_file: None,
             block_private_ip: true,
             refresh_geodata: false,
-            max_connections: 10000,
+            max_connections: MaxConnections::Auto,
             relay_idle_timeout: Duration::from_secs(100),
             auth_concurrency: 4,
             panel_ip_version: IpVersion::V4,
