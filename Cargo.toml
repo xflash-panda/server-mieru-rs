@@ -43,7 +43,7 @@ tikv-jemallocator = "0.6"
 
 [dev-dependencies]
 tokio-test = "0.4"
-criterion = { version = "0.5", features = ["async_tokio"] }
+criterion = { version = "0.8", features = ["async_tokio"] }
 
 [[bench]]
 name = "session_throughput"
