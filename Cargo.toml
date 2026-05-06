@@ -10,7 +10,7 @@ path = "src/main.rs"
 [dependencies]
 tokio = { version = "1", features = ["full", "signal"] }
 bytes = "1"
-sha2 = "0.10"
+sha2 = "0.11"
 hmac = "0.12"
 pbkdf2 = "0.12"
 chacha20poly1305 = "0.10"
