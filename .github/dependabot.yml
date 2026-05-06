@@ -4,7 +4,7 @@ registries:
     type: git
     url: https://github.com
     username: x-access-token
-    password: ${{ secrets.XFLASH_PANDA_REPO_TOKEN }}
+    password: ${{secrets.XFLASH_PANDA_REPO_TOKEN}}
 
 updates:
   - package-ecosystem: cargo
