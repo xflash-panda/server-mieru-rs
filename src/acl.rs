@@ -1013,4 +1013,65 @@ mod tests {
         let result = router.route_udp(&udp_addr).await;
         assert!(matches!(result, OutboundType::Direct { resolved: None }));
     }
+
+    // -----------------------------------------------------------------
+    // DNS routing path tests (MockResolver-driven; no network I/O).
+    // -----------------------------------------------------------------
+    mod dns_routing {
+        use super::super::*;
+        use dns_cache_rs::{DnsCache, DnsError, MockResolver};
+        use std::net::{IpAddr, Ipv4Addr, Ipv6Addr};
+        use std::sync::Arc;
+        use std::time::Duration;
+
+        /// Build an AclEngine with a default `direct(all)` rule.
+        /// Every host falls through to the DNS resolution path under test.
+        fn engine_default() -> AclEngine {
+            AclEngine::new_default().expect("default engine must compile")
+        }
+
+        /// Build an `AclRouter` with an injected `DnsCache` driven by a `MockResolver`.
+        /// `query_timeout=100ms` so timeout tests don't sleep for seconds.
+        /// The closure pre-programs the mock with whatever responses the test needs.
+        fn make_router_with_mock(
+            block_private_ip: bool,
+            setup: impl FnOnce(&MockResolver),
+        ) -> (AclRouter, Arc<MockResolver>) {
+            let mock = Arc::new(MockResolver::new());
+            setup(&mock);
+            let cache = DnsCache::builder()
+                .resolver_arc(mock.clone())
+                .query_timeout(Some(Duration::from_millis(100)))
+                .build()
+                .expect("default cache builds");
+            let router = AclRouter::with_block_private_ip_and_cache(
+                engine_default(),
+                block_private_ip,
+                cache,
+            );
+            (router, mock)
+        }
+
+        // Tests added below in subsequent steps.
+
+        #[tokio::test]
+        async fn domain_resolves_to_public_ip_returns_direct_with_ips() {
+            let public_ip = IpAddr::V4(Ipv4Addr::new(1, 2, 3, 4));
+            let (router, mock) = make_router_with_mock(true, |m| {
+                m.set("example.com", Ok(vec![public_ip]));
+            });
+
+            let result = router
+                .route(&Address::Domain("example.com".to_string(), 443))
+                .await;
+
+            match result {
+                OutboundType::Direct { resolved: Some(ips) } => {
+                    assert_eq!(*ips, [public_ip]);
+                }
+                other => panic!("expected Direct with resolved IPs, got {other:?}"),
+            }
+            assert_eq!(mock.call_count("example.com"), 1);
+        }
+    }
 }
