@@ -1206,5 +1206,46 @@ mod tests {
 
             assert!(matches!(result, OutboundType::Reject), "got {result:?}");
         }
+
+        #[tokio::test]
+        async fn cache_hit_avoids_second_resolver_call() {
+            let public = IpAddr::V4(Ipv4Addr::new(1, 2, 3, 4));
+            let (router, mock) = make_router_with_mock(true, |m| {
+                m.set("cached.test", Ok(vec![public]));
+            });
+
+            let _ = router
+                .route(&Address::Domain("cached.test".to_string(), 80))
+                .await;
+            let _ = router
+                .route(&Address::Domain("cached.test".to_string(), 80))
+                .await;
+
+            assert_eq!(
+                mock.call_count("cached.test"),
+                1,
+                "second route() must hit DNS cache, not resolver"
+            );
+        }
+
+        #[tokio::test]
+        async fn ip_literal_address_skips_resolver() {
+            let (router, mock) = make_router_with_mock(true, |_m| {
+                // 不设置任何响应——resolver 不应被调用
+            });
+
+            let result = router.route(&Address::IPv4([8, 8, 8, 8], 53)).await;
+
+            // 公网 IP 字面量 → Direct（resolved 是 None，IP 字面量不走预解析）
+            assert!(
+                matches!(result, OutboundType::Direct { resolved: None }),
+                "got {result:?}"
+            );
+            assert_eq!(
+                mock.total_calls(),
+                0,
+                "IP literal must skip resolver entirely"
+            );
+        }
     }
 }
