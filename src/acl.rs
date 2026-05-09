@@ -904,26 +904,22 @@ impl AclRouter {
                     }
                     resolved_ips = Some(ips);
                 }
-                Err(DnsError::NotFound(_)) if self.block_private_ip => {
-                    log::debug!(target = %addr, "Blocked domain (NXDOMAIN) under fail-closed policy");
-                    return OutboundType::Reject;
-                }
-                Err(DnsError::Timeout(_)) if self.block_private_ip => {
-                    log::debug!(target = %addr, "Blocked domain (DNS timeout) under fail-closed policy");
-                    return OutboundType::Reject;
-                }
-                Err(DnsError::Other(ref e)) if self.block_private_ip => {
-                    log::debug!(target = %addr, error = %e, "Blocked domain (DNS error) under fail-closed policy");
-                    return OutboundType::Reject;
-                }
                 Err(DnsError::InvalidHost(_)) => {
-                    // 非法输入永远拒绝（防御性兜底；理论上 Address::Domain 已过滤空 host）
+                    // Always reject invalid hosts regardless of block_private_ip;
+                    // Address::Domain should already filter empty hosts, this is defensive.
                     log::debug!(target = %addr, "Rejected invalid host");
                     return OutboundType::Reject;
                 }
-                Err(_) => {
-                    // block_private_ip = false 且非 InvalidHost：保留原 fallback 语义。
-                    // connect_target 会用 Address::Domain 走 TcpStream::connect((host, port)) 触发系统 DNS。
+                Err(other) => {
+                    if self.block_private_ip {
+                        // Fail-closed default covers every current and future error variant
+                        // (NotFound / Timeout / Other / ...). Per-cause detail goes through
+                        // Debug so triage still distinguishes the underlying reason.
+                        log::debug!(target = %addr, error = ?other, "Blocked domain (DNS error) under fail-closed policy");
+                        return OutboundType::Reject;
+                    }
+                    // block_private_ip = false: fall through to Direct(None);
+                    // connect_target re-resolves via system DNS at connect time.
                 }
             }
         }
