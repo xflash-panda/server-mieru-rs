@@ -97,7 +97,7 @@ pub fn parse_socks_address(data: &[u8]) -> Result<(Address, usize)> {
 /// The entire attempt is wrapped in `timeout`.
 pub async fn connect_target(
     target: &Address,
-    resolved: Option<Arc<[SocketAddr]>>,
+    resolved: Option<Arc<[std::net::IpAddr]>>,
     timeout: Duration,
 ) -> std::io::Result<TcpStream> {
     tokio::time::timeout(timeout, connect_target_inner(target, resolved))
@@ -107,17 +107,16 @@ pub async fn connect_target(
 
 async fn connect_target_inner(
     target: &Address,
-    resolved: Option<Arc<[SocketAddr]>>,
+    resolved: Option<Arc<[std::net::IpAddr]>>,
 ) -> std::io::Result<TcpStream> {
     // Use pre-resolved addresses when available to avoid a redundant DNS lookup.
-    if let Some(ref addrs) = resolved
-        && !addrs.is_empty()
+    if let Some(ref ips) = resolved
+        && !ips.is_empty()
     {
         let port = target.port();
         let mut last_err = None;
-        for addr in addrs.iter() {
-            let mut addr = *addr;
-            addr.set_port(port);
+        for ip in ips.iter() {
+            let addr = SocketAddr::new(*ip, port);
             match TcpStream::connect(addr).await {
                 Ok(stream) => {
                     let _ = stream.set_nodelay(true);
