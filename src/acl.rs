@@ -1167,7 +1167,7 @@ mod tests {
 
         #[tokio::test]
         async fn dns_timeout_fails_closed() {
-            // mock delay 远大于 cache 的 query_timeout(100ms) → 触发 Timeout 分支
+            // mock delay >> cache query_timeout(100ms) -> triggers the Timeout arm
             let (router, _mock) = make_router_with_mock(true, |m| {
                 m.set("slow.test", Ok(vec![IpAddr::V4(Ipv4Addr::new(1, 2, 3, 4))]));
                 m.set_delay(Some(Duration::from_secs(2)));
@@ -1180,7 +1180,7 @@ mod tests {
             let elapsed = start.elapsed();
 
             assert!(matches!(result, OutboundType::Reject), "got {result:?}");
-            // 应该在 ~100ms 内返回（query_timeout 触发），而不是等满 2s mock delay。
+            // Should return in ~100ms (query_timeout fires), not wait the full 2s mock delay.
             assert!(
                 elapsed < Duration::from_secs(1),
                 "should fail-closed in ~100ms, elapsed={elapsed:?}"
@@ -1227,12 +1227,12 @@ mod tests {
         #[tokio::test]
         async fn ip_literal_address_skips_resolver() {
             let (router, mock) = make_router_with_mock(true, |_m| {
-                // 不设置任何响应——resolver 不应被调用
+                // Intentionally empty: resolver must not be called.
             });
 
             let result = router.route(&Address::IPv4([8, 8, 8, 8], 53)).await;
 
-            // 公网 IP 字面量 → Direct（resolved 是 None，IP 字面量不走预解析）
+            // Public IP literal -> Direct (resolved is None; IP literals skip pre-resolution).
             assert!(
                 matches!(result, OutboundType::Direct { resolved: None }),
                 "got {result:?}"
