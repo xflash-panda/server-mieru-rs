@@ -1135,5 +1135,70 @@ mod tests {
                 other => panic!("expected Direct with private IP allowed, got {other:?}"),
             }
         }
+
+        #[tokio::test]
+        async fn nxdomain_fails_closed_when_blocking_enabled() {
+            let (router, _mock) = make_router_with_mock(true, |m| {
+                m.set("nx.test", Err(DnsError::NotFound("nx.test".into())));
+            });
+
+            let result = router
+                .route(&Address::Domain("nx.test".to_string(), 80))
+                .await;
+
+            assert!(matches!(result, OutboundType::Reject), "got {result:?}");
+        }
+
+        #[tokio::test]
+        async fn nxdomain_falls_through_when_blocking_disabled() {
+            let (router, _mock) = make_router_with_mock(false, |m| {
+                m.set("nx.test", Err(DnsError::NotFound("nx.test".into())));
+            });
+
+            let result = router
+                .route(&Address::Domain("nx.test".to_string(), 80))
+                .await;
+
+            assert!(matches!(result, OutboundType::Direct { resolved: None }),
+                "got {result:?}");
+        }
+
+        #[tokio::test]
+        async fn dns_timeout_fails_closed() {
+            // mock delay 远大于 cache 的 query_timeout(100ms) → 触发 Timeout 分支
+            let (router, _mock) = make_router_with_mock(true, |m| {
+                m.set("slow.test", Ok(vec![IpAddr::V4(Ipv4Addr::new(1, 2, 3, 4))]));
+                m.set_delay(Some(Duration::from_secs(2)));
+            });
+
+            let start = std::time::Instant::now();
+            let result = router
+                .route(&Address::Domain("slow.test".to_string(), 80))
+                .await;
+            let elapsed = start.elapsed();
+
+            assert!(matches!(result, OutboundType::Reject), "got {result:?}");
+            // 应该在 ~100ms 内返回（query_timeout 触发），而不是等满 2s mock delay。
+            assert!(
+                elapsed < Duration::from_secs(1),
+                "should fail-closed in ~100ms, elapsed={elapsed:?}"
+            );
+        }
+
+        #[tokio::test]
+        async fn dns_other_error_fails_closed() {
+            let (router, _mock) = make_router_with_mock(true, |m| {
+                m.set(
+                    "boom.test",
+                    Err(DnsError::Other(Arc::new(std::io::Error::other("boom")))),
+                );
+            });
+
+            let result = router
+                .route(&Address::Domain("boom.test".to_string(), 80))
+                .await;
+
+            assert!(matches!(result, OutboundType::Reject), "got {result:?}");
+        }
     }
 }
