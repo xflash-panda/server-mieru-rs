@@ -21,7 +21,7 @@ tokio-util = "0.7"
 async-trait = "0.1"
 subtle = "2"
 dashmap = "6.1"
-moka = { version = "0.12", features = ["future"] }
+dns-cache-rs = { git = "https://github.com/xflash-panda/dns-cache-rs.git", tag = "v0.2.0" }
 scopeguard = "1"
 clap = { version = "4", features = ["derive", "env"] }
 anyhow = "1.0"
@@ -43,6 +43,7 @@ tikv-jemallocator = "0.6"
 [dev-dependencies]
 tokio-test = "0.4"
 criterion = { version = "0.5", features = ["async_tokio"] }
+dns-cache-rs = { git = "https://github.com/xflash-panda/dns-cache-rs.git", tag = "v0.2.0", features = ["test-utils"] }
 
 [[bench]]
 name = "session_throughput"
