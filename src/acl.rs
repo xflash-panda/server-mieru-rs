@@ -1066,7 +1066,9 @@ mod tests {
                 .await;
 
             match result {
-                OutboundType::Direct { resolved: Some(ips) } => {
+                OutboundType::Direct {
+                    resolved: Some(ips),
+                } => {
                     assert_eq!(*ips, [public_ip]);
                 }
                 other => panic!("expected Direct with resolved IPs, got {other:?}"),
@@ -1129,7 +1131,9 @@ mod tests {
                 .await;
 
             match result {
-                OutboundType::Direct { resolved: Some(ips) } => {
+                OutboundType::Direct {
+                    resolved: Some(ips),
+                } => {
                     assert_eq!(*ips, [private]);
                 }
                 other => panic!("expected Direct with private IP allowed, got {other:?}"),
@@ -1159,8 +1163,10 @@ mod tests {
                 .route(&Address::Domain("nx.test".to_string(), 80))
                 .await;
 
-            assert!(matches!(result, OutboundType::Direct { resolved: None }),
-                "got {result:?}");
+            assert!(
+                matches!(result, OutboundType::Direct { resolved: None }),
+                "got {result:?}"
+            );
         }
 
         #[tokio::test]
