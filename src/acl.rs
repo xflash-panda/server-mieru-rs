@@ -1073,5 +1073,67 @@ mod tests {
             }
             assert_eq!(mock.call_count("example.com"), 1);
         }
+
+        #[tokio::test]
+        async fn domain_resolves_to_private_ipv4_blocked() {
+            let private = IpAddr::V4(Ipv4Addr::new(10, 0, 0, 1));
+            let (router, _mock) = make_router_with_mock(true, |m| {
+                m.set("internal.test", Ok(vec![private]));
+            });
+
+            let result = router
+                .route(&Address::Domain("internal.test".to_string(), 22))
+                .await;
+
+            assert!(matches!(result, OutboundType::Reject), "got {result:?}");
+        }
+
+        #[tokio::test]
+        async fn domain_resolves_to_private_ipv6_blocked() {
+            let private = IpAddr::V6(Ipv6Addr::new(0xfc00, 0, 0, 0, 0, 0, 0, 1));
+            let (router, _mock) = make_router_with_mock(true, |m| {
+                m.set("internal6.test", Ok(vec![private]));
+            });
+
+            let result = router
+                .route(&Address::Domain("internal6.test".to_string(), 22))
+                .await;
+
+            assert!(matches!(result, OutboundType::Reject), "got {result:?}");
+        }
+
+        #[tokio::test]
+        async fn domain_with_mixed_public_and_private_ips_blocks() {
+            let public = IpAddr::V4(Ipv4Addr::new(1, 2, 3, 4));
+            let private = IpAddr::V4(Ipv4Addr::new(10, 0, 0, 1));
+            let (router, _mock) = make_router_with_mock(true, |m| {
+                m.set("mixed.test", Ok(vec![public, private]));
+            });
+
+            let result = router
+                .route(&Address::Domain("mixed.test".to_string(), 80))
+                .await;
+
+            assert!(matches!(result, OutboundType::Reject), "got {result:?}");
+        }
+
+        #[tokio::test]
+        async fn domain_private_ip_allowed_when_blocking_disabled() {
+            let private = IpAddr::V4(Ipv4Addr::new(10, 0, 0, 1));
+            let (router, _mock) = make_router_with_mock(false, |m| {
+                m.set("internal.test", Ok(vec![private]));
+            });
+
+            let result = router
+                .route(&Address::Domain("internal.test".to_string(), 22))
+                .await;
+
+            match result {
+                OutboundType::Direct { resolved: Some(ips) } => {
+                    assert_eq!(*ips, [private]);
+                }
+                other => panic!("expected Direct with private IP allowed, got {other:?}"),
+            }
+        }
     }
 }
