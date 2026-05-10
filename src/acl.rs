@@ -26,7 +26,6 @@
 
 use std::collections::HashMap;
 use std::fmt;
-use std::net::SocketAddr;
 use std::num::NonZeroUsize;
 use std::path::Path;
 use std::sync::Arc;
@@ -45,6 +44,7 @@ pub use acl_engine_rs::{
         Reject, Socks5,
     },
 };
+use dns_cache_rs::{DnsCache, DnsError};
 
 use crate::logger::log;
 
@@ -113,10 +113,11 @@ impl fmt::Display for Address {
 // ---------------------------------------------------------------------------
 
 pub enum OutboundType {
-    /// Direct connection, optionally carrying pre-resolved socket addresses
+    /// Direct connection, optionally carrying pre-resolved IP addresses
     /// from DNS lookup in the router (avoids duplicate resolution in connect).
+    /// Caller fills in port from the original Address at connect time.
     Direct {
-        resolved: Option<Arc<[SocketAddr]>>,
+        resolved: Option<Arc<[std::net::IpAddr]>>,
     },
     Reject,
     /// Proxy connection via ACL engine outbound handler (Socks5, Http, etc.)
@@ -806,33 +807,6 @@ fn is_private_ipv6(ip: &[u8; 16]) -> bool {
 // AclRouter
 // ---------------------------------------------------------------------------
 
-/// Default DNS cache TTL: 120 seconds.
-const DNS_CACHE_TTL: Duration = Duration::from_secs(120);
-
-/// Negative cache TTL: 15 seconds (short, avoids hammering DNS on failures).
-const DNS_NEGATIVE_CACHE_TTL: Duration = Duration::from_secs(15);
-
-/// Maximum number of entries in the DNS cache.
-const DNS_CACHE_MAX_ENTRIES: u64 = 4096;
-
-/// Per-entry expiry policy: negative cache entries (empty addrs) get a shorter TTL.
-struct DnsExpiry;
-
-impl moka::Expiry<String, Arc<[std::net::SocketAddr]>> for DnsExpiry {
-    fn expire_after_create(
-        &self,
-        _key: &String,
-        value: &Arc<[std::net::SocketAddr]>,
-        _current_time: std::time::Instant,
-    ) -> Option<Duration> {
-        if value.is_empty() {
-            Some(DNS_NEGATIVE_CACHE_TTL)
-        } else {
-            Some(DNS_CACHE_TTL)
-        }
-    }
-}
-
 /// ACL Router adapter implementing OutboundRouter
 ///
 /// Wraps the ACL engine and implements the OutboundRouter trait
@@ -841,49 +815,37 @@ pub struct AclRouter {
     engine: AclEngine,
     /// Block connections to private/loopback IP addresses (SSRF protection)
     block_private_ip: bool,
-    /// DNS resolution cache with built-in LRU eviction, per-entry TTL, and singleflight.
-    dns_cache: moka::future::Cache<String, Arc<[std::net::SocketAddr]>>,
+    /// DNS resolution cache (LRU + per-entry TTL + singleflight + query timeout).
+    dns_cache: DnsCache,
 }
 
 impl AclRouter {
-    /// Create a new ACL router with custom private IP blocking setting
+    /// Create a new ACL router with custom private IP blocking setting.
+    /// Uses default DNS cache settings (TTL=120s, negative_ttl=15s, capacity=4096,
+    /// query_timeout=2s).
     pub fn with_block_private_ip(engine: AclEngine, block_private_ip: bool) -> Self {
-        let dns_cache = moka::future::Cache::builder()
-            .max_capacity(DNS_CACHE_MAX_ENTRIES)
-            .expire_after(DnsExpiry)
-            .build();
+        let dns_cache = DnsCache::builder()
+            .ttl(Duration::from_secs(120))
+            .negative_ttl(Duration::from_secs(15))
+            .capacity(4096)
+            .query_timeout(Some(Duration::from_secs(2)))
+            .build()
+            .expect("static defaults must validate");
+        Self::with_block_private_ip_and_cache(engine, block_private_ip, dns_cache)
+    }
+
+    /// Construct an `AclRouter` with a caller-provided `DnsCache`.
+    /// Primarily for tests injecting a `MockResolver`.
+    pub fn with_block_private_ip_and_cache(
+        engine: AclEngine,
+        block_private_ip: bool,
+        dns_cache: DnsCache,
+    ) -> Self {
         Self {
             engine,
             block_private_ip,
             dns_cache,
         }
-    }
-
-    /// Resolve a domain, using the cache if available and not expired.
-    /// Features:
-    /// - Positive cache with DNS_CACHE_TTL
-    /// - Negative cache with DNS_NEGATIVE_CACHE_TTL (avoids hammering DNS on failures)
-    /// - Singleflight: concurrent lookups for the same domain coalesce into one query (via get_with)
-    /// - Bounded capacity with LRU eviction (max DNS_CACHE_MAX_ENTRIES)
-    async fn resolve_domain(&self, host: &str) -> Option<Arc<[std::net::SocketAddr]>> {
-        // Fast path: cache hit avoids host.to_string() allocation.
-        if let Some(addrs) = self.dns_cache.get(host).await {
-            return if addrs.is_empty() { None } else { Some(addrs) };
-        }
-
-        // Cache miss: resolve and cache (get_with provides singleflight).
-        let addrs = self
-            .dns_cache
-            .get_with(host.to_string(), async {
-                tokio::net::lookup_host((host, 0u16))
-                    .await
-                    .ok()
-                    .map(|iter| iter.collect())
-                    .unwrap_or_else(|| Arc::from([]))
-            })
-            .await;
-
-        if addrs.is_empty() { None } else { Some(addrs) }
     }
 
     /// Shared routing logic parameterized by protocol.
@@ -923,39 +885,47 @@ impl AclRouter {
 
         // Direct route — resolve DNS for domain addresses so connect_target()
         // can reuse the result and we can enforce private-IP blocking.
-        let mut resolved_addrs: Option<Arc<[std::net::SocketAddr]>> = None;
+        let mut resolved_ips: Option<Arc<[std::net::IpAddr]>> = None;
 
         if let Address::Domain(domain, _) = addr {
-            if let Some(addrs) = self.resolve_domain(domain).await {
-                if self.block_private_ip {
-                    for resolved in addrs.iter() {
-                        match resolved.ip() {
-                            std::net::IpAddr::V4(ip) => {
-                                let octets = ip.octets();
-                                if is_private_ipv4(&octets) {
-                                    log::debug!(target = %addr, resolved = %ip, "Blocked domain resolving to private IPv4");
-                                    return OutboundType::Reject;
-                                }
-                            }
-                            std::net::IpAddr::V6(ip) => {
-                                let octets = ip.octets();
-                                if is_private_ipv6(&octets) {
-                                    log::debug!(target = %addr, resolved = %ip, "Blocked domain resolving to private IPv6");
-                                    return OutboundType::Reject;
-                                }
+            match self.dns_cache.resolve(domain).await {
+                Ok(ips) => {
+                    if self.block_private_ip {
+                        for ip in ips.iter() {
+                            let private = match ip {
+                                std::net::IpAddr::V4(v4) => is_private_ipv4(&v4.octets()),
+                                std::net::IpAddr::V6(v6) => is_private_ipv6(&v6.octets()),
+                            };
+                            if private {
+                                log::debug!(target = %addr, resolved = %ip, "Blocked domain resolving to private IP");
+                                return OutboundType::Reject;
                             }
                         }
                     }
+                    resolved_ips = Some(ips);
                 }
-                resolved_addrs = Some(addrs);
-            } else if self.block_private_ip {
-                log::debug!(target = %addr, "Blocked domain with unresolvable DNS (fail-closed)");
-                return OutboundType::Reject;
+                Err(DnsError::InvalidHost(_)) => {
+                    // Always reject invalid hosts regardless of block_private_ip;
+                    // Address::Domain should already filter empty hosts, this is defensive.
+                    log::debug!(target = %addr, "Rejected invalid host");
+                    return OutboundType::Reject;
+                }
+                Err(other) => {
+                    if self.block_private_ip {
+                        // Fail-closed default covers every current and future error variant
+                        // (NotFound / Timeout / Other / ...). Per-cause detail goes through
+                        // Debug so triage still distinguishes the underlying reason.
+                        log::debug!(target = %addr, error = ?other, "Blocked domain (DNS error) under fail-closed policy");
+                        return OutboundType::Reject;
+                    }
+                    // block_private_ip = false: fall through to Direct(None);
+                    // connect_target re-resolves via system DNS at connect time.
+                }
             }
         }
 
         OutboundType::Direct {
-            resolved: resolved_addrs,
+            resolved: resolved_ips,
         }
     }
 }
@@ -1038,5 +1008,240 @@ mod tests {
         let udp_addr = Address::IPv4([8, 8, 8, 8], 53);
         let result = router.route_udp(&udp_addr).await;
         assert!(matches!(result, OutboundType::Direct { resolved: None }));
+    }
+
+    // -----------------------------------------------------------------
+    // DNS routing path tests (MockResolver-driven; no network I/O).
+    // -----------------------------------------------------------------
+    mod dns_routing {
+        use super::super::*;
+        use dns_cache_rs::{DnsCache, DnsError, MockResolver};
+        use std::net::{IpAddr, Ipv4Addr, Ipv6Addr};
+        use std::sync::Arc;
+        use std::time::Duration;
+
+        /// Build an AclEngine with a default `direct(all)` rule.
+        /// Every host falls through to the DNS resolution path under test.
+        fn engine_default() -> AclEngine {
+            AclEngine::new_default().expect("default engine must compile")
+        }
+
+        /// Build an `AclRouter` with an injected `DnsCache` driven by a `MockResolver`.
+        /// `query_timeout=100ms` so timeout tests don't sleep for seconds.
+        /// The closure pre-programs the mock with whatever responses the test needs.
+        fn make_router_with_mock(
+            block_private_ip: bool,
+            setup: impl FnOnce(&MockResolver),
+        ) -> (AclRouter, Arc<MockResolver>) {
+            let mock = Arc::new(MockResolver::new());
+            setup(&mock);
+            let cache = DnsCache::builder()
+                .resolver_arc(mock.clone())
+                .query_timeout(Some(Duration::from_millis(100)))
+                .build()
+                .expect("default cache builds");
+            let router = AclRouter::with_block_private_ip_and_cache(
+                engine_default(),
+                block_private_ip,
+                cache,
+            );
+            (router, mock)
+        }
+
+        // Tests added below in subsequent steps.
+
+        #[tokio::test]
+        async fn domain_resolves_to_public_ip_returns_direct_with_ips() {
+            let public_ip = IpAddr::V4(Ipv4Addr::new(1, 2, 3, 4));
+            let (router, mock) = make_router_with_mock(true, |m| {
+                m.set("example.com", Ok(vec![public_ip]));
+            });
+
+            let result = router
+                .route(&Address::Domain("example.com".to_string(), 443))
+                .await;
+
+            match result {
+                OutboundType::Direct {
+                    resolved: Some(ips),
+                } => {
+                    assert_eq!(*ips, [public_ip]);
+                }
+                other => panic!("expected Direct with resolved IPs, got {other:?}"),
+            }
+            assert_eq!(mock.call_count("example.com"), 1);
+        }
+
+        #[tokio::test]
+        async fn domain_resolves_to_private_ipv4_blocked() {
+            let private = IpAddr::V4(Ipv4Addr::new(10, 0, 0, 1));
+            let (router, _mock) = make_router_with_mock(true, |m| {
+                m.set("internal.test", Ok(vec![private]));
+            });
+
+            let result = router
+                .route(&Address::Domain("internal.test".to_string(), 22))
+                .await;
+
+            assert!(matches!(result, OutboundType::Reject), "got {result:?}");
+        }
+
+        #[tokio::test]
+        async fn domain_resolves_to_private_ipv6_blocked() {
+            let private = IpAddr::V6(Ipv6Addr::new(0xfc00, 0, 0, 0, 0, 0, 0, 1));
+            let (router, _mock) = make_router_with_mock(true, |m| {
+                m.set("internal6.test", Ok(vec![private]));
+            });
+
+            let result = router
+                .route(&Address::Domain("internal6.test".to_string(), 22))
+                .await;
+
+            assert!(matches!(result, OutboundType::Reject), "got {result:?}");
+        }
+
+        #[tokio::test]
+        async fn domain_with_mixed_public_and_private_ips_blocks() {
+            let public = IpAddr::V4(Ipv4Addr::new(1, 2, 3, 4));
+            let private = IpAddr::V4(Ipv4Addr::new(10, 0, 0, 1));
+            let (router, _mock) = make_router_with_mock(true, |m| {
+                m.set("mixed.test", Ok(vec![public, private]));
+            });
+
+            let result = router
+                .route(&Address::Domain("mixed.test".to_string(), 80))
+                .await;
+
+            assert!(matches!(result, OutboundType::Reject), "got {result:?}");
+        }
+
+        #[tokio::test]
+        async fn domain_private_ip_allowed_when_blocking_disabled() {
+            let private = IpAddr::V4(Ipv4Addr::new(10, 0, 0, 1));
+            let (router, _mock) = make_router_with_mock(false, |m| {
+                m.set("internal.test", Ok(vec![private]));
+            });
+
+            let result = router
+                .route(&Address::Domain("internal.test".to_string(), 22))
+                .await;
+
+            match result {
+                OutboundType::Direct {
+                    resolved: Some(ips),
+                } => {
+                    assert_eq!(*ips, [private]);
+                }
+                other => panic!("expected Direct with private IP allowed, got {other:?}"),
+            }
+        }
+
+        #[tokio::test]
+        async fn nxdomain_fails_closed_when_blocking_enabled() {
+            let (router, _mock) = make_router_with_mock(true, |m| {
+                m.set("nx.test", Err(DnsError::NotFound("nx.test".into())));
+            });
+
+            let result = router
+                .route(&Address::Domain("nx.test".to_string(), 80))
+                .await;
+
+            assert!(matches!(result, OutboundType::Reject), "got {result:?}");
+        }
+
+        #[tokio::test]
+        async fn nxdomain_falls_through_when_blocking_disabled() {
+            let (router, _mock) = make_router_with_mock(false, |m| {
+                m.set("nx.test", Err(DnsError::NotFound("nx.test".into())));
+            });
+
+            let result = router
+                .route(&Address::Domain("nx.test".to_string(), 80))
+                .await;
+
+            assert!(
+                matches!(result, OutboundType::Direct { resolved: None }),
+                "got {result:?}"
+            );
+        }
+
+        #[tokio::test]
+        async fn dns_timeout_fails_closed() {
+            // mock delay >> cache query_timeout(100ms) -> triggers the Timeout arm
+            let (router, _mock) = make_router_with_mock(true, |m| {
+                m.set("slow.test", Ok(vec![IpAddr::V4(Ipv4Addr::new(1, 2, 3, 4))]));
+                m.set_delay(Some(Duration::from_secs(2)));
+            });
+
+            let start = std::time::Instant::now();
+            let result = router
+                .route(&Address::Domain("slow.test".to_string(), 80))
+                .await;
+            let elapsed = start.elapsed();
+
+            assert!(matches!(result, OutboundType::Reject), "got {result:?}");
+            // Should return in ~100ms (query_timeout fires), not wait the full 2s mock delay.
+            assert!(
+                elapsed < Duration::from_secs(1),
+                "should fail-closed in ~100ms, elapsed={elapsed:?}"
+            );
+        }
+
+        #[tokio::test]
+        async fn dns_other_error_fails_closed() {
+            let (router, _mock) = make_router_with_mock(true, |m| {
+                m.set(
+                    "boom.test",
+                    Err(DnsError::Other(Arc::new(std::io::Error::other("boom")))),
+                );
+            });
+
+            let result = router
+                .route(&Address::Domain("boom.test".to_string(), 80))
+                .await;
+
+            assert!(matches!(result, OutboundType::Reject), "got {result:?}");
+        }
+
+        #[tokio::test]
+        async fn cache_hit_avoids_second_resolver_call() {
+            let public = IpAddr::V4(Ipv4Addr::new(1, 2, 3, 4));
+            let (router, mock) = make_router_with_mock(true, |m| {
+                m.set("cached.test", Ok(vec![public]));
+            });
+
+            let _ = router
+                .route(&Address::Domain("cached.test".to_string(), 80))
+                .await;
+            let _ = router
+                .route(&Address::Domain("cached.test".to_string(), 80))
+                .await;
+
+            assert_eq!(
+                mock.call_count("cached.test"),
+                1,
+                "second route() must hit DNS cache, not resolver"
+            );
+        }
+
+        #[tokio::test]
+        async fn ip_literal_address_skips_resolver() {
+            let (router, mock) = make_router_with_mock(true, |_m| {
+                // Intentionally empty: resolver must not be called.
+            });
+
+            let result = router.route(&Address::IPv4([8, 8, 8, 8], 53)).await;
+
+            // Public IP literal -> Direct (resolved is None; IP literals skip pre-resolution).
+            assert!(
+                matches!(result, OutboundType::Direct { resolved: None }),
+                "got {result:?}"
+            );
+            assert_eq!(
+                mock.total_calls(),
+                0,
+                "IP literal must skip resolver entirely"
+            );
+        }
     }
 }
