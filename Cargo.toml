@@ -12,7 +12,7 @@ tokio = { version = "1", features = ["full", "signal"] }
 bytes = "1"
 sha2 = "0.10"
 hmac = "0.12"
-pbkdf2 = "0.12"
+pbkdf2 = "0.13"
 chacha20poly1305 = "0.10"
 rand = "0.9"
 tracing = "0.1"
